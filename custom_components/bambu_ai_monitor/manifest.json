@@ -1,13 +1,13 @@
 {
   "domain": "bambu_ai_monitor",
   "name": "Bambu AI Print Monitor",
-  "codeowners": ["@lienc"],
+  "codeowners": ["@leenc123"],
   "config_flow": true,
   "dependencies": [],
-  "documentation": "https://github.com/lienc/bambu_ai_monitor",
+  "documentation": "https://github.com/leenc123/bambu-ai-monitor",
   "integration_type": "device",
   "iot_class": "local_polling",
-  "issue_tracker": "https://github.com/lienc/bambu_ai_monitor/issues",
+  "issue_tracker": "https://github.com/leenc123/bambu-ai-monitor/issues",
   "loggers": ["bambu_ai_monitor"],
   "requirements": ["paho-mqtt>=2.0.0", "pillow>=10.0.0"],
   "version": "0.1.0"
