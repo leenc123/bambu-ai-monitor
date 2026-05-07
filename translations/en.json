@@ -1,0 +1,70 @@
+{
+  "entity": {
+    "sensor": {
+      "print_status": {
+        "name": "Print Status"
+      },
+      "print_progress": {
+        "name": "Print Progress"
+      },
+      "bed_temperature": {
+        "name": "Bed Temperature"
+      },
+      "nozzle_temperature": {
+        "name": "Nozzle Temperature"
+      },
+      "remaining_time": {
+        "name": "Remaining Time"
+      },
+      "last_analysis": {
+        "name": "Last Analysis"
+      },
+      "anomaly_type": {
+        "name": "Anomaly Type"
+      },
+      "layer_progress": {
+        "name": "Layer Progress"
+      }
+    },
+    "binary_sensor": {
+      "anomaly_detected": {
+        "name": "Anomaly Detected"
+      },
+      "printer_online": {
+        "name": "Printer Online"
+      }
+    },
+    "button": {
+      "pause_print": {
+        "name": "Pause Print"
+      },
+      "resume_print": {
+        "name": "Resume Print"
+      },
+      "stop_print": {
+        "name": "Stop Print"
+      },
+      "analyze_now": {
+        "name": "Analyze Now"
+      }
+    },
+    "switch": {
+      "auto_pause": {
+        "name": "Auto-Pause on Anomaly"
+      }
+    },
+    "select": {
+      "analysis_interval": {
+        "name": "Analysis Interval"
+      },
+      "analysis_model": {
+        "name": "AI Model"
+      }
+    },
+    "number": {
+      "confidence_threshold": {
+        "name": "Confidence Threshold"
+      }
+    }
+  }
+}

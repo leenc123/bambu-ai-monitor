@@ -1,0 +1,64 @@
+{
+  "entity": {
+    "binary_sensor": {
+      "anomaly_detected": {
+        "icon": "mdi:alert"
+      },
+      "printer_online": {
+        "icon": "mdi:printer-3d"
+      }
+    },
+    "button": {
+      "pause_print": {
+        "icon": "mdi:pause"
+      },
+      "resume_print": {
+        "icon": "mdi:play"
+      },
+      "stop_print": {
+        "icon": "mdi:stop"
+      },
+      "analyze_now": {
+        "icon": "mdi:magnify-scan"
+      }
+    },
+    "sensor": {
+      "print_status": {
+        "icon": "mdi:printer-3d"
+      },
+      "print_progress": {
+        "icon": "mdi:progress-clock"
+      },
+      "remaining_time": {
+        "icon": "mdi:timer-sand"
+      },
+      "last_analysis": {
+        "icon": "mdi:eye-check"
+      },
+      "anomaly_type": {
+        "icon": "mdi:alert-circle"
+      },
+      "layer_progress": {
+        "icon": "mdi:layers"
+      }
+    },
+    "switch": {
+      "auto_pause": {
+        "icon": "mdi:robot"
+      }
+    },
+    "select": {
+      "analysis_interval": {
+        "icon": "mdi:timer"
+      },
+      "analysis_model": {
+        "icon": "mdi:brain"
+      }
+    },
+    "number": {
+      "confidence_threshold": {
+        "icon": "mdi:percent"
+      }
+    }
+  }
+}

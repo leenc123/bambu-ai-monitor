@@ -1,0 +1,42 @@
+# Service definitions for Bambu AI Print Monitor
+
+analyze_now:
+  name: "Analyze Now"
+  description: "Trigger immediate AI analysis of the current printer snapshot."
+  fields:
+    entry_id:
+      name: "Config Entry"
+      description: "Specific config entry ID to analyze (leave empty for all)."
+      required: false
+      selector:
+        config_entry:
+          integration: bambu_ai_monitor
+
+set_analysis_interval:
+  name: "Set Analysis Interval"
+  description: "Change the AI analysis interval for the printer."
+  fields:
+    entry_id:
+      name: "Config Entry"
+      description: "Specific config entry ID to update (leave empty for all)."
+      required: false
+      selector:
+        config_entry:
+          integration: bambu_ai_monitor
+    interval:
+      name: "Analysis Interval (seconds)"
+      description: "Analysis interval in seconds (30, 60, 300, 600, or 1800)."
+      required: true
+      selector:
+        select:
+          options:
+            - label: "30 seconds"
+              value: "30"
+            - label: "1 minute"
+              value: "60"
+            - label: "5 minutes"
+              value: "300"
+            - label: "10 minutes"
+              value: "600"
+            - label: "30 minutes"
+              value: "1800"

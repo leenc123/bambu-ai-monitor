@@ -1,0 +1,60 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to Bambu Printer",
+        "description": "Enter your Bambu Lab printer connection details.",
+        "data": {
+          "host": "Printer IP address",
+          "access_code": "LAN Access Code",
+          "serial": "Printer Serial Number (optional, auto-detected)",
+          "printer_model": "Printer Model",
+          "camera_port": "Camera Port (default: 6000)"
+        }
+      },
+      "deepseek": {
+        "title": "Configure AI Analysis",
+        "description": "Enter your AI API key for print monitoring.",
+        "data": {
+          "deepseek_api_key": "API Key",
+          "analysis_model": "AI Model"
+        }
+      },
+      "options": {
+        "title": "Analysis Options",
+        "description": "Configure how often and how the AI analyzes your print.",
+        "data": {
+          "analysis_interval": "Analysis Interval",
+          "confidence_threshold": "Confidence Threshold (0.0 - 1.0)",
+          "auto_pause": "Auto-pause on anomaly detection",
+          "consecutive_detections": "Consecutive detections before pause"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Failed to connect to printer",
+      "invalid_auth": "Invalid access code",
+      "invalid_api_key": "API Key validation failed. Details: {detail}",
+      "already_configured": "Printer already configured",
+      "unknown": "Unexpected error"
+    },
+    "abort": {
+      "already_configured": "This printer is already configured",
+      "reconfigure_successful": "Reconfiguration successful"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Analysis Options",
+        "data": {
+          "analysis_interval": "Analysis Interval",
+          "confidence_threshold": "Confidence Threshold (0.0 - 1.0)",
+          "auto_pause": "Auto-pause on anomaly detection",
+          "consecutive_detections": "Consecutive detections before pause",
+          "analysis_model": "AI Model"
+        }
+      }
+    }
+  }
+}

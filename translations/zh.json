@@ -1,0 +1,70 @@
+{
+  "entity": {
+    "sensor": {
+      "print_status": {
+        "name": "打印状态"
+      },
+      "print_progress": {
+        "name": "打印进度"
+      },
+      "bed_temperature": {
+        "name": "热床温度"
+      },
+      "nozzle_temperature": {
+        "name": "喷嘴温度"
+      },
+      "remaining_time": {
+        "name": "剩余时间"
+      },
+      "last_analysis": {
+        "name": "最近分析结果"
+      },
+      "anomaly_type": {
+        "name": "异常类型"
+      },
+      "layer_progress": {
+        "name": "层进度"
+      }
+    },
+    "binary_sensor": {
+      "anomaly_detected": {
+        "name": "检测到异常"
+      },
+      "printer_online": {
+        "name": "打印机在线"
+      }
+    },
+    "button": {
+      "pause_print": {
+        "name": "暂停打印"
+      },
+      "resume_print": {
+        "name": "恢复打印"
+      },
+      "stop_print": {
+        "name": "停止打印"
+      },
+      "analyze_now": {
+        "name": "立即分析"
+      }
+    },
+    "switch": {
+      "auto_pause": {
+        "name": "异常自动暂停"
+      }
+    },
+    "select": {
+      "analysis_interval": {
+        "name": "分析间隔"
+      },
+      "analysis_model": {
+        "name": "AI模型"
+      }
+    },
+    "number": {
+      "confidence_threshold": {
+        "name": "置信度阈值"
+      }
+    }
+  }
+}
