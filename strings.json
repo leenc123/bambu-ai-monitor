@@ -16,7 +16,7 @@
         "title": "Configure AI Analysis",
         "description": "Enter your AI API key for print monitoring.",
         "data": {
-          "deepseek_api_key": "API Key",
+          "ai_api_key": "API Key",
           "analysis_model": "AI Model"
         }
       },
