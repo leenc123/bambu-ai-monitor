@@ -74,7 +74,7 @@ class BambuAIMonitorConfigFlow(ConfigFlow, domain=DOMAIN):
             if not connected:
                 errors["base"] = "cannot_connect"
             else:
-                return await self.async_step_deepseek()
+                return await self.async_step_ai_config()
 
         return self.async_show_form(
             step_id="user",
@@ -92,7 +92,7 @@ class BambuAIMonitorConfigFlow(ConfigFlow, domain=DOMAIN):
             errors=errors,
         )
 
-    async def async_step_deepseek(
+    async def async_step_ai_config(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Handle AI API key step."""
@@ -138,7 +138,7 @@ class BambuAIMonitorConfigFlow(ConfigFlow, domain=DOMAIN):
                 )
 
         return self.async_show_form(
-            step_id="deepseek",
+            step_id="ai_config",
             data_schema=vol.Schema(
                 {
                     vol.Required(CONF_AI_API_KEY): str,
@@ -239,7 +239,7 @@ class BambuAIMonitorConfigFlow(ConfigFlow, domain=DOMAIN):
     ) -> tuple[bool, str | None]:
         """Test AI API key validity."""
         try:
-            from .deepseek.client import AIClient
+            from .ai_provider.client import AIClient
 
             client = AIClient(api_key, model)
             return await client.async_validate_api_key()

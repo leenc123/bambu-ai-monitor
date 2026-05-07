@@ -35,7 +35,7 @@ from .const import (
 )
 from .bambu.models import AIAnalysisResult, PrinterStatus
 from .camera.snapshot import async_capture_snapshot
-from .deepseek.client import AIClient
+from .ai_provider.client import AIClient
 
 # Lazy import BambuLanClient to avoid paho-mqtt dependency at module load
 # TYPE_CHECKING import for type hints

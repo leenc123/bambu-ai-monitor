@@ -12,7 +12,7 @@
           "camera_port": "Camera Port (default: 6000)"
         }
       },
-      "deepseek": {
+      "ai_config": {
         "title": "Configure AI Analysis",
         "description": "Enter your AI API key for print monitoring.",
         "data": {
