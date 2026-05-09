@@ -1,5 +1,6 @@
 # Bambu AI Print Monitor
 
+[![GitHub Release](https://img.shields.io/github/v/release/leenc123/bambu-ai-monitor)](https://github.com/leenc123/bambu-ai-monitor/releases)
 [![Open in Home Assistant](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=leenc123&repository=bambu-ai-monitor&category=integration)
 
 Home Assistant 自定义集成，通过通义千问（Qwen-VL）视觉模型实时监测拓竹（Bambu Lab）3D 打印状态。
