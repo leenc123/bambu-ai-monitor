@@ -34,7 +34,7 @@ from .const import (
     ANOMALY_TRANSLATIONS,
 )
 from .bambu.models import AIAnalysisResult, PrinterStatus
-from .camera.snapshot import async_capture_snapshot
+from .camera.snapshot import async_capture_snapshot, check_image_quality
 from .ai_provider.client import AIClient
 
 # Lazy import BambuLanClient to avoid paho-mqtt dependency at module load
@@ -224,6 +224,18 @@ class BambuAICoordinator(DataUpdateCoordinator[BambuMonitorData]):
 
             if not snapshot:
                 self._data.last_error = "Failed to capture camera snapshot"
+                return
+
+            # Check image quality before AI analysis
+            quality_ok, quality_score = check_image_quality(snapshot)
+            if not quality_ok:
+                _LOGGER.warning(
+                    "Image too blurry (quality=%.1f), skipping AI analysis",
+                    quality_score,
+                )
+                self._data.last_error = (
+                    f"画面不清晰，跳过AI检测 (清晰度: {quality_score:.0f})"
+                )
                 return
 
             # Build context for analysis

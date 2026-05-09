@@ -7,13 +7,14 @@ import logging
 import io
 
 import aiohttp
-from PIL import Image
+from PIL import Image, ImageFilter
 
 _LOGGER = logging.getLogger(__name__)
 
 DEFAULT_CAMERA_PORT = 6000
 MAX_IMAGE_SIZE = 1024  # Maximum dimension in pixels
 JPEG_QUALITY = 80
+BLUR_THRESHOLD = 100  # Laplacian variance threshold; below this = blurry
 
 
 async def async_capture_snapshot(
@@ -89,3 +90,45 @@ def _prepare_image(image_bytes: bytes) -> bytes:
     except Exception as err:
         _LOGGER.error("Failed to prepare image: %s", err)
         return image_bytes  # Return original if processing fails
+
+
+def check_image_quality(image_bytes: bytes, threshold: int = BLUR_THRESHOLD) -> tuple[bool, float]:
+    """Check image sharpness using Laplacian variance.
+
+    Uses PIL's built-in edge detection filter to approximate the Laplacian
+    response, then computes pixel variance. Low variance = blurry image.
+
+    Args:
+        image_bytes: JPEG image bytes
+        threshold: Minimum acceptable Laplacian variance (default 100)
+
+    Returns:
+        Tuple of (is_acceptable, laplacian_variance)
+    """
+    try:
+        image = Image.open(io.BytesIO(image_bytes)).convert("L")
+
+        # Apply edge detection (approximates Laplacian gradient magnitude)
+        edges = image.filter(ImageFilter.FIND_EDGES)
+
+        # Compute pixel variance as sharpness metric
+        pixels = list(edges.getdata())
+        n = len(pixels)
+        if n == 0:
+            return False, 0.0
+
+        mean = sum(pixels) / n
+        variance = sum((p - mean) ** 2 for p in pixels) / n
+
+        is_acceptable = variance >= threshold
+        _LOGGER.debug(
+            "Image quality: variance=%.1f, threshold=%d, acceptable=%s",
+            variance,
+            threshold,
+            is_acceptable,
+        )
+        return is_acceptable, variance
+
+    except Exception as err:
+        _LOGGER.warning("Failed to check image quality: %s", err)
+        return True, 0.0  # Pass through on error, don't block analysis
