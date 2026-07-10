@@ -30,6 +30,7 @@ class BambuAutoPauseSwitch(BambuAIBaseEntity, SwitchEntity):
     """Switch to enable/disable auto-pause on anomaly detection."""
 
     _attr_translation_key = "auto_pause"
+    _attr_name = "异常自动暂停"
     _attr_icon = "mdi:robot"
 
     @property

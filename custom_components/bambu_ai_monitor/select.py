@@ -8,10 +8,7 @@ from homeassistant.components.select import SelectEntity
 
 from .const import (
     CONF_ANALYSIS_INTERVAL,
-    CONF_ANALYSIS_MODEL,
     DEFAULT_ANALYSIS_INTERVAL,
-    DEFAULT_ANALYSIS_MODEL,
-    AI_MODELS,
     DOMAIN,
 )
 from .coordinator import BambuAICoordinator
@@ -30,7 +27,6 @@ def _setup_selects(coordinator: BambuAICoordinator) -> list[BambuAIBaseEntity]:
     """Return select entities."""
     return [
         BambuAnalysisIntervalSelect(coordinator),
-        BambuAnalysisModelSelect(coordinator),
     ]
 
 
@@ -44,6 +40,7 @@ class BambuAnalysisIntervalSelect(BambuAIBaseEntity, SelectEntity):
     """Select for analysis interval."""
 
     _attr_translation_key = "analysis_interval"
+    _attr_name = "分析间隔"
     _attr_icon = "mdi:timer"
 
     @property
@@ -69,35 +66,4 @@ class BambuAnalysisIntervalSelect(BambuAIBaseEntity, SelectEntity):
         )
         self.coordinator.update_interval = timedelta(seconds=interval)
         self.coordinator.async_request_refresh()
-        self.async_write_ha_state()
-
-
-class BambuAnalysisModelSelect(BambuAIBaseEntity, SelectEntity):
-    """Select for AI analysis model."""
-
-    _attr_translation_key = "analysis_model"
-    _attr_icon = "mdi:brain"
-
-    @property
-    def current_option(self) -> str:
-        """Return the current model."""
-        return self.coordinator.config_entry.options.get(
-            CONF_ANALYSIS_MODEL,
-            self.coordinator.config_entry.data.get(
-                CONF_ANALYSIS_MODEL, DEFAULT_ANALYSIS_MODEL
-            ),
-        )
-
-    @property
-    def options(self) -> list[str]:
-        """Return available models."""
-        return list(AI_MODELS.keys())
-
-    async def async_select_option(self, option: str) -> None:
-        """Change the selected model."""
-        options = dict(self.coordinator.config_entry.options)
-        options[CONF_ANALYSIS_MODEL] = option
-        self.hass.config_entries.async_update_entry(
-            self.coordinator.config_entry, options=options
-        )
         self.async_write_ha_state()

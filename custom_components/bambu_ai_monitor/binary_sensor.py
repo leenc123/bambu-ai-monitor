@@ -17,6 +17,7 @@ def _setup_binary_sensors(coordinator: BambuAICoordinator) -> list[BambuAIBaseEn
     return [
         BambuAnomalyDetectedBinarySensor(coordinator),
         BambuPrinterOnlineBinarySensor(coordinator),
+        BambuInferenceServerBinarySensor(coordinator),
     ]
 
 
@@ -50,3 +51,16 @@ class BambuPrinterOnlineBinarySensor(BambuAIBaseEntity, BinarySensorEntity):
     def is_on(self) -> bool:
         """Return True if printer is online."""
         return self.coordinator.data.printer_online
+
+
+class BambuInferenceServerBinarySensor(BambuAIBaseEntity, BinarySensorEntity):
+    """Binary sensor for inference server status."""
+
+    _attr_translation_key = "inference_server"
+    _attr_device_class = BinarySensorDeviceClass.RUNNING
+    _attr_icon = "mdi:server"
+
+    @property
+    def is_on(self) -> bool:
+        """Return True if the inference server is running."""
+        return self.coordinator.inference_server.is_running

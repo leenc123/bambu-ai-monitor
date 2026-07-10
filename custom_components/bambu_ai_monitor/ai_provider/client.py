@@ -1,246 +1,149 @@
-"""AI client for image analysis using 通义千问 (DashScope)."""
+"""Local YOLOv8 detection via ONNX Runtime for 3D print anomaly analysis.
+
+Uses subprocess to call a Python script running on the HOST machine
+(via SSH or direct execution), since the HA container uses musl libc
+which is incompatible with onnxruntime's glibc binaries.
+"""
 
 from __future__ import annotations
 
-import asyncio
-import base64
 import json
 import logging
+from pathlib import Path
 from typing import Any
 
 import aiohttp
 
-from homeassistant.helpers.aiohttp_client import async_get_clientsession
-from homeassistant.core import HomeAssistant
-
-from ..const import DEFAULT_ANALYSIS_MODEL
+from ..const import DEFAULT_INFERENCE_HOST, DEFAULT_INFERENCE_PORT
 
 _LOGGER = logging.getLogger(__name__)
 
-# DashScope (通义千问) OpenAI-compatible endpoint
-DASHSCOPE_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-DASHSCOPE_CHAT_ENDPOINT = "/chat/completions"
 
-# Prompt for 3D print quality analysis
-ANALYSIS_PROMPT = """Analyze this 3D printer camera snapshot for print quality issues.
-
-Check for these common failures:
-- Spaghetti: tangled, stringy filament mess on the build plate
-- Warping: corners or edges lifting from the build plate
-- Layer shift: misaligned layers, visible steps on the print
-- Under extrusion: gaps, thin walls, incomplete layers, missing filament
-- Over extrusion: blobs, elephant foot, excess filament buildup
-- Detachment: print completely detached from the build plate
-- Other anomalies: anything else abnormal about the print
-
-Respond ONLY with raw JSON. Do NOT use markdown code blocks, do NOT wrap in backticks. Use this exact format:
-{"anomaly_detected": true/false, "anomaly_type": "spaghetti"|"warping"|"layer_shift"|"under_extrusion"|"over_extrusion"|"detachment"|"none"|"other", "confidence": 0.0-1.0, "description": "Brief explanation in Chinese"}"""
-
-
-class AIClient:
-    """Client for 通义千问 (DashScope) API with vision support."""
+class YOLODetector:
+    """HTTP client for host-side YOLO inference server."""
 
     def __init__(
         self,
-        api_key: str,
-        model: str = DEFAULT_ANALYSIS_MODEL,
-        hass: HomeAssistant | None = None,
-        base_url: str = DASHSCOPE_BASE_URL,
+        host: str = DEFAULT_INFERENCE_HOST,
+        port: int = DEFAULT_INFERENCE_PORT,
     ) -> None:
-        """Initialize the AI client.
+        """Initialize the detector.
 
         Args:
-            api_key: DashScope API key
-            model: Model name to use for analysis
-            hass: HomeAssistant instance (for session reuse)
-            base_url: API base URL
+            host: Inference server hostname (default: localhost)
+            port: Inference server port (default: 19530)
         """
-        self._api_key = api_key
-        self._model = model
-        self._hass = hass
-        self._base_url = base_url
+        self._host = host
+        self._port = port
+        self._base_url = f"http://{host}:{port}"
 
-    async def async_validate_api_key(self) -> tuple[bool, str | None]:
-        """Validate the API key with a cheap text-only test call.
+    @property
+    def base_url(self) -> str:
+        """Get the base URL of the inference server."""
+        return self._base_url
 
-        Returns:
-            Tuple of (is_valid, error_message_or_none)
-        """
+    async def async_validate_connection(self) -> tuple[bool, str | None]:
+        """Check if the inference server is reachable."""
         try:
-            session = self._get_session()
-
-            async with session.post(
-                f"{self._base_url}{DASHSCOPE_CHAT_ENDPOINT}",
-                headers=self._get_headers(),
-                json={
-                    "model": "qwen-turbo",
-                    "messages": [
-                        {"role": "user", "content": "Say 'ok' in one word."},
-                    ],
-                    "max_tokens": 10,
-                },
-                timeout=aiohttp.ClientTimeout(total=15),
-            ) as response:
-                if response.status == 200:
-                    return True, None
-                elif response.status == 401:
-                    _LOGGER.error("API: Invalid API key (401 Unauthorized)")
-                    return False, "API Key 无效，请检查通义千问 API Key 是否正确"
-                elif response.status == 403:
-                    body = await response.text()
-                    _LOGGER.error("API: Forbidden (403), body=%s", body)
-                    return False, "API 访问被拒绝 (403)，请检查账户状态或余额"
-                elif response.status == 429:
-                    return False, "API 调用频率超限 (429)，请稍后重试"
-                elif response.status == 404:
-                    body = await response.text()
-                    _LOGGER.error(
-                        "API: Model not found (404), body=%s", body,
-                    )
-                    return False, f"模型不存在，API 响应: {body}"
-                else:
-                    body = await response.text()
-                    _LOGGER.error(
-                        "API validation failed: status=%s, body=%s",
-                        response.status,
-                        body,
-                    )
-                    return False, f"API 验证失败 (HTTP {response.status}): {body}"
-
-        except aiohttp.ClientConnectorError as err:
-            _LOGGER.error("API connection error: %s", err)
-            return False, f"网络连接错误: {err}"
-        except asyncio.TimeoutError:
-            _LOGGER.error("API timeout")
-            return False, "API 请求超时，请检查网络连接"
-        except aiohttp.ClientError as err:
-            _LOGGER.error("API network error: %s", err)
-            return False, f"网络错误: {err}"
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    f"{self._base_url}/health",
+                    timeout=aiohttp.ClientTimeout(total=5),
+                ) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        if data.get("status") == "ok":
+                            return True, None
+                        return False, f"推理服务器状态异常: {data.get('status')}"
+                    return False, f"推理服务器返回 HTTP {response.status}"
+        except aiohttp.ClientConnectorError:
+            return (
+                False,
+                f"无法连接到推理服务器 ({self._base_url})\n"
+                "请确保宿主机上已启动推理服务器:\n"
+                "  python3 inference_server/server.py",
+            )
         except Exception as err:
-            _LOGGER.error("API unexpected error: %s", err)
-            return False, f"未知错误: {err}"
+            return False, f"连接推理服务器出错: {err}"
 
     async def async_analyze_image(
         self,
         image_bytes: bytes,
         context: dict[str, Any],
     ) -> str:
-        """Send image to 通义千问 VL API for print quality analysis.
-
-        Uses the OpenAI-compatible chat completions API with base64-encoded
-        image content inline in the messages.
-
-        Args:
-            image_bytes: JPEG image bytes
-            context: Printer context dict (unused for API, kept for compatibility)
-
-        Returns:
-            Raw content string from the AI response
-        """
+        """Send image to host inference server for YOLO detection."""
         try:
-            session = self._get_session()
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{self._base_url}/analyze",
+                    data=image_bytes,
+                    headers={"Content-Type": "application/octet-stream"},
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as response:
+                    if response.status == 200:
+                        result = await response.json()
+                        return json.dumps(result)
+                    else:
+                        text = await response.text()
+                        _LOGGER.error(
+                            "Inference server error: HTTP %s - %s",
+                            response.status,
+                            text[:200],
+                        )
+                        return json.dumps({
+                            "anomaly_detected": False,
+                            "anomaly_type": "none",
+                            "confidence": 0.0,
+                            "description": f"推理服务器错误 (HTTP {response.status})",
+                        })
 
-            # Encode image as base64 data URI
-            b64_image = base64.b64encode(image_bytes).decode("utf-8")
-
-            # Build multimodal message (OpenAI-compatible format)
-            messages = [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": ANALYSIS_PROMPT},
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:image/jpeg;base64,{b64_image}",
-                            },
-                        },
-                    ],
-                },
-            ]
-
-            async with session.post(
-                f"{self._base_url}{DASHSCOPE_CHAT_ENDPOINT}",
-                headers=self._get_headers(),
-                json={
-                    "model": self._model,
-                    "messages": messages,
-                    "max_tokens": 512,
-                },
-                timeout=aiohttp.ClientTimeout(total=60),
-            ) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    # Standard chat completions response
-                    content = (
-                        data.get("choices", [{}])[0]
-                        .get("message", {})
-                        .get("content", "")
-                    )
-                    if not content:
-                        content = json.dumps(data)
-                    _LOGGER.debug("AI API response: %s", content)
-                    return content
-                elif response.status == 401:
-                    _LOGGER.error("API: Invalid API key (401)")
-                    return json.dumps({
-                        "anomaly_detected": False,
-                        "anomaly_type": "none",
-                        "confidence": 0.0,
-                        "description": "API Key 无效",
-                    })
-                elif response.status == 429:
-                    _LOGGER.warning("API rate limit exceeded (429)")
-                    return json.dumps({
-                        "anomaly_detected": False,
-                        "anomaly_type": "none",
-                        "confidence": 0.0,
-                        "description": "API 调用频率超限",
-                    })
-                else:
-                    body = await response.text()
-                    _LOGGER.error(
-                        "API error: status=%s, body=%s",
-                        response.status,
-                        body,
-                    )
-                    return json.dumps({
-                        "anomaly_detected": False,
-                        "anomaly_type": "other",
-                        "confidence": 0.0,
-                        "description": f"API 错误: HTTP {response.status} - {body[:200]}",
-                    })
-
-        except aiohttp.ClientError as err:
-            _LOGGER.error("API network error: %s", err)
+        except aiohttp.ClientConnectorError:
+            _LOGGER.error("Cannot connect to inference server at %s", self._base_url)
             return json.dumps({
                 "anomaly_detected": False,
                 "anomaly_type": "none",
                 "confidence": 0.0,
-                "description": f"网络错误: {err}",
+                "description": "推理服务器未启动，请在宿主机运行: python3 inference_server/server.py",
             })
         except Exception as err:
-            _LOGGER.error("API unexpected error: %s", err)
+            _LOGGER.error("Inference request error: %s", err)
             return json.dumps({
                 "anomaly_detected": False,
                 "anomaly_type": "none",
                 "confidence": 0.0,
-                "description": f"未知错误: {err}",
+                "description": f"推理请求错误: {err}",
             })
 
-    def _get_headers(self) -> dict[str, str]:
-        """Get API request headers."""
-        return {
-            "Authorization": f"Bearer {self._api_key}",
-            "Content-Type": "application/json",
-        }
 
-    def _get_session(self) -> aiohttp.ClientSession:
-        """Get an aiohttp session, preferring Home Assistant's shared session."""
-        if self._hass:
-            return async_get_clientsession(self._hass)
-        return aiohttp.ClientSession()
+    async def async_visualize_image(
+        self,
+        image_bytes: bytes,
+    ) -> bytes | None:
+        """Send image to host inference server and return annotated JPEG."""
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{self._base_url}/visualize",
+                    data=image_bytes,
+                    headers={"Content-Type": "application/octet-stream"},
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as response:
+                    if response.status == 200:
+                        return await response.read()
+                    else:
+                        _LOGGER.warning(
+                            "Visualize server error: HTTP %s", response.status
+                        )
+                        return None
+        except aiohttp.ClientConnectorError:
+            _LOGGER.error(
+                "Cannot connect to visualize server at %s", self._base_url
+            )
+            return None
+        except Exception as err:
+            _LOGGER.error("Visualize request error: %s", err)
+            return None
 
 
-# Backward-compatible alias for existing imports
-DeepSeekClient = AIClient
+# Backward-compatible alias
+AIClient = YOLODetector

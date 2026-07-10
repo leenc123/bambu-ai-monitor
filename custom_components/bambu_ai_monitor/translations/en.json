@@ -56,14 +56,16 @@
     "select": {
       "analysis_interval": {
         "name": "Analysis Interval"
-      },
-      "analysis_model": {
-        "name": "AI Model"
       }
     },
     "number": {
       "confidence_threshold": {
         "name": "Confidence Threshold"
+      }
+    },
+    "camera": {
+      "annotated_snapshot": {
+        "name": "YOLO Detection View"
       }
     }
   }

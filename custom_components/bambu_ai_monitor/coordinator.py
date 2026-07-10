@@ -14,18 +14,19 @@ from homeassistant.components.persistent_notification import async_create
 
 from .const import (
     CONF_ANALYSIS_INTERVAL,
-    CONF_ANALYSIS_MODEL,
     CONF_AUTO_PAUSE,
     CONF_CONFIDENCE_THRESHOLD,
     CONF_CONSECUTIVE_DETECTIONS,
-    CONF_AI_API_KEY,
+    CONF_INFERENCE_HOST,
+    CONF_INFERENCE_PORT,
     CONF_HOST,
     CONF_ACCESS_CODE,
     CONF_CAMERA_PORT,
     CONF_PRINTER_MODEL,
     CONF_SERIAL,
     DEFAULT_ANALYSIS_INTERVAL,
-    DEFAULT_ANALYSIS_MODEL,
+    DEFAULT_INFERENCE_HOST,
+    DEFAULT_INFERENCE_PORT,
     DEFAULT_AUTO_PAUSE,
     DEFAULT_CAMERA_PORT,
     DEFAULT_CONFIDENCE_THRESHOLD,
@@ -35,7 +36,8 @@ from .const import (
 )
 from .bambu.models import AIAnalysisResult, PrinterStatus
 from .camera.snapshot import async_capture_snapshot, check_image_quality
-from .ai_provider.client import AIClient
+from .ai_provider.client import YOLODetector
+from .service_manager import InferenceServerManager
 
 # Lazy import BambuLanClient to avoid paho-mqtt dependency at module load
 # TYPE_CHECKING import for type hints
@@ -79,7 +81,7 @@ class BambuAICoordinator(DataUpdateCoordinator[BambuMonitorData]):
         # _entry must be set before super().__init__() because _get_update_interval() uses it
         self._entry = entry
         self._bambu_client: BambuLanClient | None = None
-        self._ai_client: AIClient | None = None
+        self._yolo_detector: YOLODetector | None = None
 
         super().__init__(
             hass,
@@ -102,6 +104,20 @@ class BambuAICoordinator(DataUpdateCoordinator[BambuMonitorData]):
             CONF_CONSECUTIVE_DETECTIONS, DEFAULT_CONSECUTIVE_DETECTIONS
         )
         self._analysis_requested = False
+        self._last_annotated_image: bytes | None = None
+
+        # Inference server lifecycle
+        inference_host = entry.data.get(
+            CONF_INFERENCE_HOST, DEFAULT_INFERENCE_HOST
+        )
+        inference_port = entry.options.get(
+            CONF_INFERENCE_PORT,
+            entry.data.get(CONF_INFERENCE_PORT, DEFAULT_INFERENCE_PORT),
+        )
+        self._inference_server = InferenceServerManager(
+            inference_host=inference_host,
+            inference_port=inference_port,
+        )
 
     @property
     def bambu_client(self) -> BambuLanClient | None:
@@ -122,10 +138,21 @@ class BambuAICoordinator(DataUpdateCoordinator[BambuMonitorData]):
         host = data[CONF_HOST]
         access_code = data[CONF_ACCESS_CODE]
         serial = data.get(CONF_SERIAL, "")
-        api_key = data[CONF_AI_API_KEY]
-        model = data.get(CONF_ANALYSIS_MODEL, DEFAULT_ANALYSIS_MODEL)
+        inference_host = self._entry.options.get(
+            CONF_INFERENCE_HOST,
+            data.get(CONF_INFERENCE_HOST, DEFAULT_INFERENCE_HOST),
+        )
+        inference_port = self._entry.options.get(
+            CONF_INFERENCE_PORT,
+            data.get(CONF_INFERENCE_PORT, DEFAULT_INFERENCE_PORT),
+        )
 
-        _LOGGER.info("Setting up coordinator for %s (model: %s)", host, data.get(CONF_PRINTER_MODEL))
+        _LOGGER.info(
+            "Setting up coordinator for %s (inference: %s:%s)",
+            host,
+            inference_host,
+            inference_port,
+        )
 
         # Check for debug/mock mode
         from .bambu.mock_client import MockBambuClient, is_mock_mode
@@ -143,13 +170,16 @@ class BambuAICoordinator(DataUpdateCoordinator[BambuMonitorData]):
 
         self._bambu_client.register_status_callback(self._on_printer_status_update)
 
-        # Initialize AI client for image analysis
-        self._ai_client = AIClient(api_key, model, self.hass)
+        # Initialize YOLO detector (connects to host inference server)
+        self._yolo_detector = YOLODetector(inference_host, inference_port)
 
         # Connect to printer
         _LOGGER.info("Connecting to printer at %s...", host)
         connected = await self._bambu_client.async_connect()
         _LOGGER.info("Printer connection %s", "succeeded" if connected else "failed")
+
+        # Check inference server reachability on host
+        await self._inference_server.async_ensure_running()
         if connected:
             self._data.printer_online = True
             # Update serial if not set
@@ -160,12 +190,9 @@ class BambuAICoordinator(DataUpdateCoordinator[BambuMonitorData]):
 
     async def _async_update_data(self) -> BambuMonitorData:
         """Fetch data from the printer and perform AI analysis."""
-        # Ensure connected
+        # Ensure connected — background _reconnect_loop handles retry with ping gate
         if not self._bambu_client or not self._bambu_client.is_connected:
-            if self._bambu_client:
-                _LOGGER.debug("Reconnecting to printer...")
-                await self._bambu_client.async_connect()
-            self._data.printer_online = self._bambu_client.is_connected if self._bambu_client else False
+            self._data.printer_online = False
             self._data.last_error = "Printer not connected"
             return self._data
 
@@ -192,6 +219,9 @@ class BambuAICoordinator(DataUpdateCoordinator[BambuMonitorData]):
             self._data.total_layer_count,
         )
 
+        # Periodically refresh inference server health status
+        await self._inference_server.async_check_health()
+
         # Only analyze when actively printing
         if self._data.printer_status == "running" or self._analysis_requested:
             self._analysis_requested = False
@@ -200,12 +230,11 @@ class BambuAICoordinator(DataUpdateCoordinator[BambuMonitorData]):
         return self._data
 
     async def _perform_analysis(self) -> None:
-        """Capture snapshot and send to AI for analysis."""
-        if not self._bambu_client or not self._ai_client:
+        """Capture snapshot and run local YOLO detection."""
+        if not self._bambu_client or not self._yolo_detector:
             return
 
         try:
-            # Get config data (used for both real and mock mode)
             data = self._entry.data
 
             # Check for mock mode
@@ -215,44 +244,59 @@ class BambuAICoordinator(DataUpdateCoordinator[BambuMonitorData]):
                 snapshot = self._bambu_client.snapshot_provider.get_snapshot()
                 _LOGGER.debug("DEBUG MODE: Using mock snapshot for analysis")
             else:
-                # Capture snapshot from real camera
-                snapshot = await async_capture_snapshot(
-                    data[CONF_HOST],
-                    data[CONF_ACCESS_CODE],
-                    data.get(CONF_CAMERA_PORT, DEFAULT_CAMERA_PORT),
-                )
+                # Try MQTT camera frame first (A1 Mini pushes JPEG via MQTT)
+                snapshot = None
+                if self._bambu_client and self._bambu_client.camera_frame:
+                    snapshot = self._bambu_client.camera_frame
+                    _LOGGER.info("Got snapshot from MQTT camera: %d bytes", len(snapshot))
+
+                if not snapshot:
+                    # Fallback 1: direct HTTP to printer port 6000
+                    snapshot = await async_capture_snapshot(
+                        data[CONF_HOST],
+                        data[CONF_ACCESS_CODE],
+                        data.get(CONF_CAMERA_PORT, DEFAULT_CAMERA_PORT),
+                    )
+
+                if not snapshot:
+                    # Fallback 2: use existing HA camera entity
+                    snapshot = await self._capture_from_ha_camera()
 
             if not snapshot:
                 self._data.last_error = "Failed to capture camera snapshot"
                 return
 
-            # Check image quality before AI analysis
+            # Check image quality before detection
             quality_ok, quality_score = check_image_quality(snapshot)
             if not quality_ok:
                 _LOGGER.warning(
-                    "Image too blurry (quality=%.1f), skipping AI analysis",
+                    "Image too blurry (quality=%.1f), skipping detection",
                     quality_score,
                 )
                 self._data.last_error = (
-                    f"画面不清晰，跳过AI检测 (清晰度: {quality_score:.0f})"
+                    f"画面不清晰，跳过检测 (清晰度: {quality_score:.0f})"
                 )
                 return
 
-            # Build context for analysis
-            context = {
-                "model": data.get(CONF_PRINTER_MODEL, "Unknown"),
-                "progress": self._data.print_progress,
-                "bed_temp": self._data.bed_temperature,
-                "bed_target": self._data.bed_target_temperature,
-                "nozzle_temp": self._data.nozzle_temperature,
-                "nozzle_target": self._data.nozzle_target_temperature,
-                "current_layer": self._data.layer_num,
-                "total_layers": self._data.total_layer_count,
-            }
+            # Send to inference server for visualization (annotated image)
+            try:
+                self._last_annotated_image = await self._yolo_detector.async_visualize_image(
+                    snapshot
+                )
+                if self._last_annotated_image:
+                    _LOGGER.info(
+                        "Annotated image updated: %d bytes",
+                        len(self._last_annotated_image),
+                    )
+                else:
+                    _LOGGER.warning("Visualize returned no data")
+            except Exception as vis_err:
+                _LOGGER.warning("Failed to get annotated image: %s", vis_err)
+                self._last_annotated_image = None
 
-            # Call AI API for image analysis
-            raw_response = await self._ai_client.async_analyze_image(
-                snapshot, context
+            # Run local YOLO detection
+            raw_response = await self._yolo_detector.async_analyze_image(
+                snapshot, {}
             )
 
             # Parse result
@@ -300,6 +344,27 @@ class BambuAICoordinator(DataUpdateCoordinator[BambuMonitorData]):
         except Exception as err:
             self._data.last_error = f"Analysis error: {err}"
             _LOGGER.error("Analysis error: %s", err)
+
+    async def _capture_from_ha_camera(self) -> bytes | None:
+        """Fallback: capture snapshot from HA camera entity (A1 Mini etc.)."""
+        try:
+            from homeassistant.components import camera as camera_comp
+
+            # Find a camera entity from the Bambu Lab integration
+            for state in self.hass.states.async_all():
+                entity_id = state.entity_id
+                if entity_id.startswith("camera.") and ("bambu" in entity_id.lower() or "a1" in entity_id.lower() or "printer" in entity_id.lower()):
+                    image = await camera_comp.async_get_image(
+                        self.hass, entity_id, timeout=10
+                    )
+                    if image and image.content:
+                        _LOGGER.info("Got snapshot from HA camera: %s (%d bytes)", entity_id, len(image.content))
+                        return image.content
+            _LOGGER.warning("No Bambu Lab camera entity found in HA")
+            return None
+        except Exception as err:
+            _LOGGER.warning("Failed to capture from HA camera: %s", err)
+            return None
 
     async def _async_pause_print(self) -> bool:
         """Pause the current print."""
@@ -386,8 +451,14 @@ class BambuAICoordinator(DataUpdateCoordinator[BambuMonitorData]):
             notification_id=f"bambu_anomaly_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
         )
 
+    @property
+    def inference_server(self) -> InferenceServerManager:
+        """Get the inference server manager."""
+        return self._inference_server
+
     async def async_cleanup(self) -> None:
         """Clean up coordinator resources."""
+        await self._inference_server.async_stop()
         if self._bambu_client:
             await self._bambu_client.async_disconnect()
             self._bambu_client = None

@@ -2,57 +2,74 @@
   "config": {
     "step": {
       "user": {
-        "title": "Connect to Bambu Printer",
-        "description": "Enter your Bambu Lab printer connection details.",
+        "title": "连接拓竹打印机",
+        "description": "输入打印机连接信息和 YOLO 模型路径",
         "data": {
-          "host": "Printer IP address",
-          "access_code": "LAN Access Code",
-          "serial": "Printer Serial Number (optional, auto-detected)",
-          "printer_model": "Printer Model",
-          "camera_port": "Camera Port (default: 6000)"
-        }
-      },
-      "ai_config": {
-        "title": "Configure AI Analysis",
-        "description": "Enter your AI API key for print monitoring.",
-        "data": {
-          "ai_api_key": "API Key",
-          "analysis_model": "AI Model"
-        }
-      },
-      "options": {
-        "title": "Analysis Options",
-        "description": "Configure how often and how the AI analyzes your print.",
-        "data": {
-          "analysis_interval": "Analysis Interval",
-          "confidence_threshold": "Confidence Threshold (0.0 - 1.0)",
-          "auto_pause": "Auto-pause on anomaly detection",
-          "consecutive_detections": "Consecutive detections before pause"
+          "host": "打印机 IP 地址",
+          "access_code": "局域网访问码",
+          "serial": "打印机序列号（可选，自动检测）",
+          "printer_model": "打印机型号",
+          "camera_port": "摄像头端口（默认: 6000）",
+          "yolo_model_path": "YOLO ONNX 模型路径",
+          "inference_host": "推理服务器地址（默认: 127.0.0.1）",
+          "inference_port": "推理服务器端口（默认: 19530）"
         }
       }
     },
     "error": {
-      "cannot_connect": "Failed to connect to printer",
-      "invalid_auth": "Invalid access code",
-      "invalid_api_key": "API Key validation failed. Details: {detail}",
-      "already_configured": "Printer already configured",
-      "unknown": "Unexpected error"
+      "cannot_connect": "无法连接到打印机",
+      "invalid_auth": "访问码错误",
+      "already_configured": "打印机已配置",
+      "unknown": "未知错误"
     },
     "abort": {
-      "already_configured": "This printer is already configured",
-      "reconfigure_successful": "Reconfiguration successful"
+      "already_configured": "此打印机已配置",
+      "reconfigure_successful": "重新配置成功"
+    }
+  },
+  "entity": {
+    "sensor": {
+      "print_status": { "name": "打印状态" },
+      "print_progress": { "name": "打印进度" },
+      "bed_temperature": { "name": "热床温度" },
+      "nozzle_temperature": { "name": "喷嘴温度" },
+      "remaining_time": { "name": "剩余时间" },
+      "last_analysis": { "name": "最近分析结果" },
+      "anomaly_type": { "name": "异常类型" },
+      "layer_progress": { "name": "层进度" }
+    },
+    "binary_sensor": {
+      "anomaly_detected": { "name": "检测到异常" },
+      "printer_online": { "name": "打印机在线" },
+      "inference_server": { "name": "推理服务运行中" }
+    },
+    "button": {
+      "analyze_now": { "name": "立即分析" }
+    },
+    "switch": {
+      "auto_pause": { "name": "异常自动暂停" }
+    },
+    "select": {
+      "analysis_interval": { "name": "分析间隔" }
+    },
+    "number": {
+      "confidence_threshold": { "name": "置信度阈值" }
+    },
+    "camera": {
+      "annotated_snapshot": { "name": "YOLO 检测画面" }
     }
   },
   "options": {
     "step": {
       "init": {
-        "title": "Analysis Options",
+        "title": "分析选项",
         "data": {
-          "analysis_interval": "Analysis Interval",
-          "confidence_threshold": "Confidence Threshold (0.0 - 1.0)",
-          "auto_pause": "Auto-pause on anomaly detection",
-          "consecutive_detections": "Consecutive detections before pause",
-          "analysis_model": "AI Model"
+          "analysis_interval": "分析间隔",
+          "confidence_threshold": "置信度阈值 (0.0 - 1.0)",
+          "auto_pause": "检测到异常时自动暂停",
+          "consecutive_detections": "触发暂停的连续检测次数",
+          "inference_host": "推理服务器地址",
+          "inference_port": "推理服务器端口"
         }
       }
     }

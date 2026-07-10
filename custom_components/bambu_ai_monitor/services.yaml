@@ -2,7 +2,7 @@
 
 analyze_now:
   name: "Analyze Now"
-  description: "Trigger immediate AI analysis of the current printer snapshot."
+  description: "Trigger immediate YOLO detection analysis of the current printer snapshot."
   fields:
     entry_id:
       name: "Config Entry"

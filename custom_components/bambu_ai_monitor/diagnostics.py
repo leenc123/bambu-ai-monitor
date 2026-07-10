@@ -8,7 +8,7 @@ from homeassistant.components.diagnostics import REDACTED
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
-from .const import CONF_ACCESS_CODE, CONF_AI_API_KEY, CONF_SERIAL, DOMAIN
+from .const import CONF_ACCESS_CODE, CONF_YOLO_MODEL_PATH, CONF_SERIAL, DOMAIN
 
 
 async def async_get_config_entry_diagnostics(
@@ -20,8 +20,6 @@ async def async_get_config_entry_diagnostics(
     config_data = {**entry.data}
     if CONF_ACCESS_CODE in config_data:
         config_data[CONF_ACCESS_CODE] = REDACTED
-    if CONF_AI_API_KEY in config_data:
-        config_data[CONF_AI_API_KEY] = REDACTED
     if CONF_SERIAL in config_data:
         config_data[CONF_SERIAL] = REDACTED
 

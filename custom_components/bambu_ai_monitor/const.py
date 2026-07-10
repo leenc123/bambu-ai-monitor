@@ -10,29 +10,38 @@ CONF_ACCESS_CODE = "access_code"
 CONF_SERIAL = "serial"
 CONF_PRINTER_MODEL = "printer_model"
 CONF_CAMERA_PORT = "camera_port"
-CONF_AI_API_KEY = "ai_api_key"
+CONF_YOLO_MODEL_PATH = "yolo_model_path"
+CONF_INFERENCE_HOST = "inference_host"
+CONF_INFERENCE_PORT = "inference_port"
 CONF_ANALYSIS_INTERVAL = "analysis_interval"
 CONF_CONFIDENCE_THRESHOLD = "confidence_threshold"
 CONF_AUTO_PAUSE = "auto_pause"
-CONF_ANALYSIS_MODEL = "analysis_model"
 CONF_CONSECUTIVE_DETECTIONS = "consecutive_detections"
+CONF_SSH_HOST = "host_ssh_host"
+CONF_SSH_USER = "host_ssh_user"
+CONF_SSH_PORT = "host_ssh_port"
+CONF_SSH_KEY = "host_ssh_key"
 
 # Defaults
 DEFAULT_CAMERA_PORT = 6000
 DEFAULT_MQTT_PORT = 8883
 DEFAULT_ANALYSIS_INTERVAL = 300  # 5 minutes
-DEFAULT_CONFIDENCE_THRESHOLD = 0.7
+DEFAULT_CONFIDENCE_THRESHOLD = 0.5  # YOLO detection confidence threshold
 DEFAULT_AUTO_PAUSE = True
-DEFAULT_ANALYSIS_MODEL = "qwen-vl-max-latest"
 DEFAULT_CONSECUTIVE_DETECTIONS = 2
+# Default ONNX model path: relative to the component directory
+DEFAULT_YOLO_MODEL_PATH = "model/best.onnx"
+DEFAULT_INFERENCE_HOST = "localhost"
+DEFAULT_INFERENCE_PORT = 19530
 
-# AI provider display name
-AI_PROVIDER_NAME = "通义千问"
+# YOLO detection classes
+YOLO_CLASS_NAMES = ["spaghetti", "stringing", "zits"]
 
-# Vision-capable AI models
-AI_MODELS = {
-    "qwen-vl-max-latest": "通义千问 VL Max (推荐)",
-    "qwen-vl-plus-latest": "通义千问 VL Plus",
+# YOLO → AnomalyType mapping (class name → internal type)
+YOLO_ANOMALY_TYPE_MAP = {
+    "spaghetti": "spaghetti",
+    "stringing": "stringing",
+    "zits": "zits",
 }
 
 # Analysis interval options (seconds)
@@ -57,25 +66,19 @@ class PrinterModel(StrEnum):
 
 
 class AnomalyType(StrEnum):
-    """Print anomaly types."""
+    """Print anomaly types (YOLO-detected classes)."""
 
     SPAGHETTI = "spaghetti"
-    WARPING = "warping"
-    LAYER_SHIFT = "layer_shift"
-    UNDER_EXTRUSION = "under_extrusion"
-    OVER_EXTRUSION = "over_extrusion"
-    DETACHMENT = "detachment"
+    STRINGING = "stringing"
+    ZITS = "zits"
     NONE = "none"
     OTHER = "other"
 
 
 ANOMALY_TRANSLATIONS = {
-    "spaghetti": "炒面/面条状挤出",
-    "warping": "翘边",
-    "layer_shift": "层偏移",
-    "under_extrusion": "欠挤出",
-    "over_extrusion": "过挤出",
-    "detachment": "脱落/脱离热床",
+    "spaghetti": "炒面/拉丝",
+    "stringing": "拉丝/丝状溢出",
+    "zits": "疙瘩/表面凸起",
     "none": "正常",
     "other": "其他异常",
 }

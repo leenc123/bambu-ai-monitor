@@ -18,12 +18,11 @@ from .coordinator import BambuAICoordinator
 _LOGGER = logging.getLogger(__name__)
 
 PLATFORMS = [
-    "sensor",
-    "binary_sensor",
     "button",
     "switch",
     "select",
     "number",
+    "camera",
 ]
 
 type BambuAIConfigEntry = ConfigEntry[BambuAICoordinator]

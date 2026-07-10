@@ -46,7 +46,10 @@ class BambuPrintStatusSensor(BambuAIBaseEntity, SensorEntity):
 
     @property
     def native_value(self) -> str:
-        """Return the current printer status."""
+        """Return the current printer / MQTT connection status."""
+        data = self.coordinator.data
+        if not data.printer_online:
+            return "已断开"
         status_map = {
             "idle": "空闲",
             "preparing": "准备中",
@@ -56,7 +59,7 @@ class BambuPrintStatusSensor(BambuAIBaseEntity, SensorEntity):
             "failed": "已失败",
             "unknown": "未知",
         }
-        return status_map.get(self.coordinator.data.printer_status, "未知")
+        return status_map.get(data.printer_status, "未知")
 
 
 class BambuPrintProgressSensor(BambuAIBaseEntity, SensorEntity):

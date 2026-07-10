@@ -34,6 +34,7 @@ class BambuConfidenceThresholdNumber(BambuAIBaseEntity, NumberEntity):
     """Number input for AI confidence threshold."""
 
     _attr_translation_key = "confidence_threshold"
+    _attr_name = "置信度阈值"
     _attr_native_min_value = 0.1
     _attr_native_max_value = 1.0
     _attr_native_step = 0.05

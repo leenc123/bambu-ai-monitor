@@ -51,9 +51,6 @@
       "analysis_interval": {
         "icon": "mdi:timer"
       },
-      "analysis_model": {
-        "icon": "mdi:brain"
-      }
     },
     "number": {
       "confidence_threshold": {
