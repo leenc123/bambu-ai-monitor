@@ -34,14 +34,12 @@ DEFAULT_YOLO_MODEL_PATH = "model/best.onnx"
 DEFAULT_INFERENCE_HOST = "localhost"
 DEFAULT_INFERENCE_PORT = 19530
 
-# YOLO detection classes
-YOLO_CLASS_NAMES = ["spaghetti", "stringing", "zits"]
+# YOLO detection classes (single-class: spaghetti only)
+YOLO_CLASS_NAMES = ["spaghetti"]
 
 # YOLO → AnomalyType mapping (class name → internal type)
 YOLO_ANOMALY_TYPE_MAP = {
     "spaghetti": "spaghetti",
-    "stringing": "stringing",
-    "zits": "zits",
 }
 
 # Analysis interval options (seconds)
@@ -69,18 +67,12 @@ class AnomalyType(StrEnum):
     """Print anomaly types (YOLO-detected classes)."""
 
     SPAGHETTI = "spaghetti"
-    STRINGING = "stringing"
-    ZITS = "zits"
     NONE = "none"
-    OTHER = "other"
 
 
 ANOMALY_TRANSLATIONS = {
     "spaghetti": "炒面/拉丝",
-    "stringing": "拉丝/丝状溢出",
-    "zits": "疙瘩/表面凸起",
     "none": "正常",
-    "other": "其他异常",
 }
 
 # Printer status mapping

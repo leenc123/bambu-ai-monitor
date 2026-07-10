@@ -33,12 +33,10 @@ log = logging.getLogger("yolo-server")
 DEFAULT_MODEL = "best.onnx"
 DEFAULT_PORT = 19530
 
-# YOLO classes (must match training data)
-YOLO_CLASS_NAMES = ["spaghetti", "stringing", "zits"]
+# YOLO classes (single-class: spaghetti only)
+YOLO_CLASS_NAMES = ["spaghetti"]
 YOLO_ANOMALY_TYPE_MAP = {
     "spaghetti": "spaghetti",
-    "stringing": "stringing",
-    "zits": "zits",
 }
 
 INPUT_SIZE = 640
@@ -225,8 +223,6 @@ class YOLOHandler(BaseHTTPRequestHandler):
 
             box_colors = {
                 "spaghetti": "#FF4444",
-                "stringing": "#FFAA00",
-                "zits": "#FF44FF",
             }
 
             for det in detections:
