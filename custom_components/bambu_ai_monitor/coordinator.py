@@ -458,7 +458,6 @@ class BambuAICoordinator(DataUpdateCoordinator[BambuMonitorData]):
 
     async def async_cleanup(self) -> None:
         """Clean up coordinator resources."""
-        await self._inference_server.async_stop()
         if self._bambu_client:
             await self._bambu_client.async_disconnect()
             self._bambu_client = None

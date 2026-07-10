@@ -50,7 +50,7 @@
     "select": {
       "analysis_interval": {
         "icon": "mdi:timer"
-      },
+      }
     },
     "number": {
       "confidence_threshold": {
