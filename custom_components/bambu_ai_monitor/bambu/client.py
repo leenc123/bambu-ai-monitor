@@ -5,16 +5,62 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import ssl
+import time
 from typing import Any, Callable
 
 import paho.mqtt.client as mqtt
 
+from .commands import BambuCommands
 from .models import PrinterStatus, parse_printer_status
 
 _LOGGER = logging.getLogger(__name__)
 
 DEFAULT_MQTT_PORT = 8883
+
+
+def _safe_json_loads(payload: bytes) -> dict | None:
+    """Safely parse Bambu printer MQTT payload into JSON.
+
+    Bambu printers sometimes send non-standard JSON:
+    - Single quotes instead of double quotes
+    - Python-style ``True``/``False`` instead of ``true``/``false``
+    - Mixed encodings (latin-1 bytes in utf-8 text)
+
+    This tries standard JSON first, then falls back to cleaning the
+    payload text before re-parsing.
+    """
+    # 1. Standard JSON parse first (most common case)
+    try:
+        return json.loads(payload)
+    except json.JSONDecodeError:
+        pass
+
+    # 2. Decode to text and clean up Python-isms
+    try:
+        # Try utf-8 first, then latin-1 (bytes-preserving fallback)
+        try:
+            text = payload.decode("utf-8")
+        except UnicodeDecodeError:
+            text = payload.decode("latin-1")
+
+        # Clean up Python-format non-standard JSON
+        # Order matters: fix booleans FIRST to avoid True → "true" being
+        # affected by the single-quote step (which would make it "'true'")
+        text = text.replace("False", "false")
+        text = text.replace("True", "true")
+        text = text.replace("None", "null")
+        text = re.sub(r"'", '"', text)  # single quotes → double quotes
+
+        return json.loads(text)
+    except (json.JSONDecodeError, ValueError, UnicodeDecodeError) as err:
+        _LOGGER.warning(
+            "Failed to parse MQTT payload: %s\nRaw (repr): %r",
+            err,
+            payload[:500],
+        )
+        return None
 DEFAULT_TIMEOUT = 30
 
 
@@ -44,6 +90,12 @@ class BambuLanClient:
         self._camera_callbacks: list[Callable[[bytes], None]] = []
         # Event loop reference for cross-thread callbacks (set in async_connect)
         self._loop: asyncio.AbstractEventLoop | None = None
+        # Push retry state: printer may not respond to pushall immediately
+        self._data_received: bool = False
+        self._push_retry_task: asyncio.Task | None = None
+        # Watchdog: detects if data flow stops mid-operation
+        self._last_data_time: float = 0.0
+        self._watchdog_task: asyncio.Task | None = None
 
     @property
     def status(self) -> PrinterStatus:
@@ -162,6 +214,63 @@ class BambuLanClient:
                 else:
                     self._client.subscribe("device/#", qos=0)
 
+                # 10. Wait for MQTT connection to stabilize before sending commands.
+                # A1 Mini (and some other models) disconnect immediately if
+                # SUBSCRIBE or PUBLISH arrives too fast after CONNACK.
+                await asyncio.sleep(2)
+
+                # 11. Request printer to start pushing data via MQTT.
+                # Without pushall + get_version, the printer will NOT send
+                # any status updates — the MQTT connection stays silent.
+                if self._serial:
+                    request_topic = f"device/{self._serial}/request"
+                    self._client.publish(
+                        request_topic,
+                        BambuCommands.build_get_version_command(),
+                        qos=0,
+                    )
+                    self._client.publish(
+                        request_topic,
+                        BambuCommands.build_push_all_command(),
+                        qos=0,
+                    )
+                    _LOGGER.info(
+                        "Published get_version + pushall to %s",
+                        request_topic,
+                    )
+                else:
+                    # Serial not configured — subscribe to device/# wildcard
+                    # and try common serial prefixes until data arrives
+                    _LOGGER.warning(
+                        "Serial not configured. "
+                        "Attempting pushall on auto-discover topics.",
+                    )
+                    # Try some common request topic formats to trigger push
+                    for candidate in ["0", "001", "000"]:
+                        candidate_topic = f"device/{candidate}/request"
+                        self._client.publish(
+                            candidate_topic,
+                            BambuCommands.build_get_version_command(),
+                            qos=0,
+                        )
+                        self._client.publish(
+                            candidate_topic,
+                            BambuCommands.build_push_all_command(),
+                            qos=0,
+                        )
+
+                # 12. Start background push retry + watchdog.
+                # - Push retry: resends pushall every 5s until first data arrives
+                # - Watchdog: if data flow stops for 60s mid-operation, resend pushall
+                self._data_received = False
+                self._last_data_time = time.time()
+                self._push_retry_task = asyncio.create_task(
+                    self._push_retry_loop()
+                )
+                self._watchdog_task = asyncio.create_task(
+                    self._watchdog_loop()
+                )
+
                 return self._connected
 
             except Exception as err:
@@ -183,8 +292,10 @@ class BambuLanClient:
 
     async def async_disconnect(self) -> None:
         """Disconnect from printer."""
-        """Disconnect from printer."""
         self._should_reconnect = False
+
+        self._stop_push_retry()
+        self._stop_watchdog()
 
         if self._reconnect_task:
             self._reconnect_task.cancel()
@@ -200,6 +311,7 @@ class BambuLanClient:
             self._client = None
 
         self._connected = False
+        self._data_received = False
 
     async def async_test_connection(self) -> bool:
         """Test if printer is reachable."""
@@ -288,6 +400,132 @@ class BambuLanClient:
         payload = BambuCommands.build_stop_command()
         return await self.async_send_command(payload)
 
+    def _stop_push_retry(self) -> None:
+        """Cancel the push retry task if running."""
+        if self._push_retry_task and not self._push_retry_task.done():
+            self._push_retry_task.cancel()
+            self._push_retry_task = None
+
+    async def _push_retry_loop(self) -> None:
+        """Retry pushall until data arrives from the printer.
+
+        Bambu printers (especially A1 Mini) often ignore the first
+        pushall/get_version sent immediately after MQTT connect.
+        This background task retries every 5 seconds until the
+        printer starts pushing data or the connection drops.
+
+        If serial is not yet configured, tries candidate topics
+        to discover it from the first response.
+        """
+        _LOGGER.debug("Push retry loop started")
+
+        retry_count = 0
+        while self._should_reconnect and self._connected:
+            # Wait before checking (initial 2s delay is already in async_connect)
+            await asyncio.sleep(5)
+
+            if self._data_received:
+                _LOGGER.debug(
+                    "Push retry: data received after %d retries, stopping",
+                    retry_count,
+                )
+                break
+
+            if not self._client or not self._connected:
+                break
+
+            retry_count += 1
+
+            if self._serial:
+                # Normal case: serial known, send to exact topic
+                request_topic = f"device/{self._serial}/request"
+                self._client.publish(
+                    request_topic,
+                    BambuCommands.build_push_all_command(),
+                    qos=0,
+                )
+                _LOGGER.info(
+                    "Push retry #%d: re-sent pushall to %s (no data yet)",
+                    retry_count,
+                    request_topic,
+                )
+            else:
+                # Serial not discovered yet — keep trying candidates
+                for candidate in ["0", "001", "000"]:
+                    candidate_topic = f"device/{candidate}/request"
+                    self._client.publish(
+                        candidate_topic,
+                        BambuCommands.build_push_all_command(),
+                        qos=0,
+                    )
+                _LOGGER.info(
+                    "Push retry #%d: pushall to candidates (serial unknown)",
+                    retry_count,
+                )
+
+        self._push_retry_task = None
+        _LOGGER.debug("Push retry loop ended")
+
+    def _stop_watchdog(self) -> None:
+        """Cancel the watchdog task if running."""
+        if self._watchdog_task and not self._watchdog_task.done():
+            self._watchdog_task.cancel()
+            self._watchdog_task = None
+
+    async def _watchdog_loop(self) -> None:
+        """Monitor data flow and recover if it stops.
+
+        Bambu printers may pause data push mid-print (network glitch,
+        printer sleep, firmware quirk).  If no MQTT data arrives for
+        60 seconds after initial connection, resend pushall to restart
+        the data flow.
+
+        This runs alongside _push_retry_loop:
+        - Push retry: aggressive 5s retry during INITIAL CONNECT
+        - Watchdog:   conservative 60s check during ONGOING OPERATION
+        """
+        _LOGGER.debug("Watchdog loop started (60s timeout)")
+
+        while self._should_reconnect and self._connected:
+            await asyncio.sleep(10)
+
+            if not self._client or not self._connected:
+                break
+
+            elapsed = time.time() - self._last_data_time
+
+            if not self._data_received:
+                # Still waiting for first data — push retry handles this
+                continue
+
+            if elapsed < 60:
+                # Data flowing normally
+                continue
+
+            _LOGGER.warning(
+                "Watchdog fired: no data for %.0fs, re-sending pushall",
+                elapsed,
+            )
+            if self._serial:
+                request_topic = f"device/{self._serial}/request"
+                self._client.publish(
+                    request_topic,
+                    BambuCommands.build_push_all_command(),
+                    qos=0,
+                )
+            else:
+                for candidate in ["0", "001", "000"]:
+                    self._client.publish(
+                        f"device/{candidate}/request",
+                        BambuCommands.build_push_all_command(),
+                        qos=0,
+                    )
+            # Reset timer so we don't spam on every 10s check
+            self._last_data_time = time.time()
+
+        self._watchdog_task = None
+        _LOGGER.debug("Watchdog loop ended")
+
     def _on_connect(self, client, userdata, flags, reason_code, properties=None) -> None:
         """Handle MQTT connect callback (VERSION2 signature).
 
@@ -330,30 +568,50 @@ class BambuLanClient:
                         _LOGGER.exception("Error in camera callback")
                 return
 
-        # Parse JSON status messages
-        try:
-            payload = json.loads(msg.payload)
-            self._status = parse_printer_status(payload)
+        # Parse JSON status messages — use safe loader to handle
+        # non-standard JSON from Bambu printers (single quotes,
+        # Python-style True/False)
+        payload = _safe_json_loads(msg.payload)
+        if payload is None:
+            _LOGGER.debug(
+                "Skipping unparseable MQTT message on %s (%d bytes)",
+                msg.topic, len(msg.payload),
+            )
+            return
 
-            # Extract serial if not set
-            if not self._serial:
-                self._serial = payload.get("print", {}).get("sequence_id", "")
-                if not self._serial:
-                    parts = msg.topic.split("/")
-                    if len(parts) >= 2:
-                        self._serial = parts[1]
+        self._status = parse_printer_status(payload)
 
-            # Notify callbacks
-            for callback in self._status_callbacks:
-                try:
-                    callback(self._status)
-                except Exception:
-                    _LOGGER.exception("Error in status callback")
+        # Track data arrival (stops push retry, resets watchdog)
+        self._last_data_time = time.time()
+        if not self._data_received:
+            self._data_received = True
+            _LOGGER.info(
+                "First data received from printer on %s",
+                msg.topic,
+            )
 
-        except json.JSONDecodeError:
-            pass
-        except Exception:
-            _LOGGER.exception("Error parsing MQTT message")
+        # Log printer status for diagnosis
+        _LOGGER.debug(
+            "Parsed status: gcode_state=%s, progress=%s, layers=%s/%s",
+            self._status.gcode_state,
+            self._status.print_progress,
+            self._status.layer_num,
+            self._status.total_layer_count,
+        )
+
+        # Extract serial from topic if not configured
+        if not self._serial:
+            parts = msg.topic.split("/")
+            if len(parts) >= 2:
+                self._serial = parts[1]
+                _LOGGER.info("Auto-detected serial from topic: %s", self._serial)
+
+        # Notify callbacks
+        for callback in self._status_callbacks:
+            try:
+                callback(self._status)
+            except Exception:
+                _LOGGER.exception("Error in status callback")
 
     def _start_reconnect_safe(self) -> None:
         """Safely start reconnection from the event loop thread."""

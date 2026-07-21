@@ -223,7 +223,15 @@ class BambuAICoordinator(DataUpdateCoordinator[BambuMonitorData]):
         await self._inference_server.async_check_health()
 
         # Only analyze when actively printing
-        if self._data.printer_status == "running" or self._analysis_requested:
+        # 放宽条件：除了 gcode_state == RUNNING，也检查实际进度
+        # 因为 MQTT 消息可能延迟，gcode_state 可能不准确
+        is_printing = (
+            self._data.printer_status == "running"
+            or self._data.print_progress > 0
+            or self._data.layer_num > 0
+            or self._analysis_requested
+        )
+        if is_printing:
             self._analysis_requested = False
             await self._perform_analysis()
 
@@ -408,6 +416,18 @@ class BambuAICoordinator(DataUpdateCoordinator[BambuMonitorData]):
             self._data.printer_status = "idle"
         return result
 
+    def _schedule_analysis_from_callback(self) -> None:
+        """Schedule analysis from MQTT callback thread onto HA event loop.
+
+        MQTT callbacks run on paho's network thread.  We cannot await
+        async methods there — jump to the HA event loop thread instead.
+        """
+        self._analysis_requested = True
+        asyncio.run_coroutine_threadsafe(
+            self.async_request_refresh(),
+            self.hass.loop,
+        )
+
     async def async_analyze_now(self) -> None:
         """Trigger an immediate analysis."""
         self._analysis_requested = True
@@ -422,7 +442,13 @@ class BambuAICoordinator(DataUpdateCoordinator[BambuMonitorData]):
             self.update_interval = timedelta(seconds=interval)
 
     def _on_printer_status_update(self, status: PrinterStatus) -> None:
-        """Handle printer status update from MQTT callback."""
+        """Handle printer status update from MQTT callback.
+
+        This runs on the paho MQTT thread, NOT the HA event loop.
+        When the printer is actively printing, immediately schedule
+        analysis via the HA event loop (event-driven, not poll-based).
+        """
+        prev_status = self._data.printer_status
         self._data.printer_status = self._map_printer_status(status.gcode_state)
         self._data.print_progress = status.print_progress
         self._data.bed_temperature = status.bed_temperature
@@ -430,6 +456,29 @@ class BambuAICoordinator(DataUpdateCoordinator[BambuMonitorData]):
         self._data.remaining_time_min = status.remaining_time_sec // 60
         self._data.layer_num = status.layer_num
         self._data.total_layer_count = status.total_layer_count
+
+        _LOGGER.debug(
+            "MQTT callback: gcode_state=%s -> printer_status=%s, progress=%.1f%%, layers=%d/%d",
+            status.gcode_state,
+            self._data.printer_status,
+            status.print_progress,
+            status.layer_num,
+            status.total_layer_count,
+        )
+
+        # 打印中 → 立即调度分析，不等 coordinator 的下一次轮询（300s）
+        # 参考 ha-bambulab 的事件驱动模式：MQTT 消息到达立即触发更新
+        is_printing = (
+            self._data.printer_status == "running"
+            or status.print_progress > 0
+            or status.layer_num > 0
+        )
+        if is_printing and not self._analysis_requested:
+            _LOGGER.info(
+                "Printer is printing (progress=%.1f%%), scheduling immediate analysis",
+                status.print_progress,
+            )
+            self._schedule_analysis_from_callback()
 
     async def _async_send_notification(self, result: AIAnalysisResult) -> None:
         """Send a persistent notification with analysis result."""
