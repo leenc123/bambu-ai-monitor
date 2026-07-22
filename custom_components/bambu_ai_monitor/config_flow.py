@@ -42,7 +42,7 @@ _LOGGER = logging.getLogger(__name__)
 _LABEL = {
     CONF_HOST: "打印机 IP 地址",
     CONF_ACCESS_CODE: "局域网访问码",
-    CONF_SERIAL: "打印机序列号（可选）",
+    CONF_SERIAL: "打印机序列号",
     CONF_PRINTER_MODEL: "打印机型号",
     CONF_CAMERA_PORT: "摄像头端口",
     CONF_YOLO_MODEL_PATH: "YOLO ONNX 模型路径",
@@ -148,7 +148,7 @@ class BambuAIMonitorConfigFlow(ConfigFlow, domain=DOMAIN):
                 {
                     vol.Required(_labeled_key(CONF_HOST)): str,
                     vol.Required(_labeled_key(CONF_ACCESS_CODE)): str,
-                    vol.Optional(_labeled_key(CONF_SERIAL), default=""): str,
+                    vol.Required(_labeled_key(CONF_SERIAL)): str,
                     vol.Required(_labeled_key(CONF_PRINTER_MODEL)): vol.In(
                         {m.value: m.value for m in PrinterModel}
                     ),
@@ -224,7 +224,7 @@ class BambuAIMonitorConfigFlow(ConfigFlow, domain=DOMAIN):
                         _labeled_key(CONF_ACCESS_CODE),
                         default=entry.data[CONF_ACCESS_CODE],
                     ): str,
-                    vol.Optional(
+                    vol.Required(
                         _labeled_key(CONF_SERIAL),
                         default=entry.data.get(CONF_SERIAL, ""),
                     ): str,
