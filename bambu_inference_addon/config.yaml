@@ -1,5 +1,5 @@
 name: Bambu Inference
-version: 0.2.0
+version: 0.2.1
 slug: bambu_inference
 description: YOLOv8 ONNX inference server for Bambu AI Print Monitor (no host systemd needed)
 arch:

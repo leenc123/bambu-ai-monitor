@@ -193,7 +193,9 @@ class InferenceServerManager:
             "Image": INFERENCE_IMAGE,
             "name": CONTAINER_NAME,
             "ExposedPorts": {"19530/tcp": {}},
-            "Env": [f"MODEL_PATH=/model/best.onnx", f"PORT={self._inference_port}"],
+            # Container always listens on 19530 internally; the custom port
+            # is applied on the host side via PortBindings below.
+            "Env": ["MODEL_PATH=/model/best.onnx"],
             "HostConfig": {
                 "Binds": [f"{MODEL_DIR}:/model:ro"],
                 "PortBindings": {
