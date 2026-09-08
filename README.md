@@ -116,12 +116,41 @@ Home Assistant → 设置 → 设备与服务 → 添加集成 → 搜索 **Bamb
 | 环境 | 行为 |
 |------|------|
 | **Docker + 挂载了 `/var/run/docker.sock`** | ✅ **全自动** — 通过 Docker API 拉起 `bambu-ai-inference` 侧车容器（`RestartPolicy: always`），模型自动同步到 `/config/bambu_ai_model`。用户无需任何操作 |
-| **Docker + 未挂载 socket** | 配置流出现 inference 提示页：去 Add-on Store 安装“Bambu Inference”并启动，回来点继续 |
-| **HA OS（虚拟机/物理机）** | 同上，Add-on 方式，一次 UI 点击，开机自启 |
+| **HA OS / Supervised（无 socket）** | 配置流出现 inference 提示页：去 Add-on Store 安装“Bambu Inference”并启动，回来点继续，一次 UI 点击 |
+| **纯 Docker 无 socket**（CasaOS / BigBear 等，改不了 HA 容器挂载） | 手动启动侧车容器一次（见下节），`--restart always` 之后开机自启、崩溃自启 |
 
 > **推荐挂载 Docker socket**（compose 加一行 `- /var/run/docker.sock:/var/run/docker.sock`），之后全程零操作。HA OS 用户用 Add-on，同样无 SSH/命令行。
 
 安装完成后可在 Home Assistant 中查看 `binary_sensor.inference_server` 确认服务状态。
+
+#### 手动启动侧车容器（一次性，仅纯 Docker 无 socket 环境）
+
+```bash
+# 1. 如之前装过旧版 systemd 服务，先停掉（否则 19530 端口冲突）：
+sudo systemctl stop yolo-inference-server
+sudo systemctl disable yolo-inference-server
+sudo rm -f /etc/systemd/system/yolo-inference-server.service
+sudo systemctl daemon-reload
+sudo rm -rf /opt/bambu-ai-inference
+
+# 2. 准备模型目录（从已安装的集成目录拷，或从 GitHub 拉）：
+mkdir -p ~/bambu_ai_model
+cp <ha_config>/custom_components/bambu_ai_monitor/model/best.onnx ~/bambu_ai_model/
+# 或：curl -sSL -o ~/bambu_ai_model/best.onnx \
+#   https://raw.githubusercontent.com/leenc123/bambu-ai-monitor/main/custom_components/bambu_ai_monitor/model/best.onnx
+
+# 3. 启动侧车（一次即可，开机自启）：
+docker run -d --name bambu-ai-inference --restart always \
+  -p 19530:19530 -v ~/bambu_ai_model:/model:ro \
+  -e MODEL_PATH=/model/best.onnx \
+  ghcr.io/leenc123/bambu-inference:latest
+
+# 4. 验证：
+curl -s http://localhost:19530/health
+# 应返回 {"status": "ok", ...}
+```
+
+> **bridge 网络注意**：CasaOS 类平台的 HA 容器一般是 bridge 模式，容器内的 `localhost` 到不了宿主机端口。先查 `docker inspect <ha容器名> --format '{{.HostConfig.NetworkMode}}'`，如果是 bridge，把集成选项里的“推理服务器地址”改成 `docker0` 网卡 IP（`ip addr show docker0`，一般是 `172.17.0.1`）或宿主机局域网 IP，不要填 `localhost`。
 
 ## 实体列表
 
@@ -206,7 +235,9 @@ logger:
 检查 `binary_sensor.inference_server`：
 
 - 如果为 **off** 且 Docker socket 已挂载 → 等待约 1 分钟（首次拉镜像），`docker ps` 应能看到 `bambu-ai-inference`
-- 如果为 **off** 且未挂载 Docker socket → 去 设置 → Add-on → 安装并启动“Bambu Inference”（详见 `bambu_inference_addon/README.md`），无需任何宿主机命令
+- 如果为 **off** 且是 HA OS / Supervised → 去 设置 → Add-on → 安装并启动“Bambu Inference”（详见 `bambu_inference_addon/README.md`）
+- 如果为 **off** 且是纯 Docker 无 socket（CasaOS / BigBear）→ 按上节手动起侧车；若 `docker ps` 看不到容器，先查旧 systemd 是否还占着 19530：`sudo systemctl status yolo-inference-server`，占着就按上节第 1 步清掉
+- 如果侧车已在跑但集成连不上 → 检查 HA 容器网络模式：bridge 模式下“推理服务器地址”不能填 `localhost`，改填 `docker0` IP 或宿主机局域网 IP
 
 ### 摄像头无画面
 
