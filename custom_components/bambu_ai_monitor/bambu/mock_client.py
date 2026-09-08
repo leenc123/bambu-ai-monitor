@@ -302,8 +302,8 @@ class MockBambuClient:
 
                 self._status.print_progress = progress
                 self._status.mc_percent = int(progress)
-                self._status.remaining_time_sec = int(
-                    (100 - progress) / 100 * self._sim_print_duration
+                self._status.remaining_time_min = int(
+                    (100 - progress) / 100 * self._sim_print_duration / 60
                 )
                 self._status.layer_num = int(progress / 100 * self._status.total_layer_count)
 

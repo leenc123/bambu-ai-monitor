@@ -1,8 +1,9 @@
-"""Local YOLOv8 detection via ONNX Runtime for 3D print anomaly analysis.
+"""YOLOv8 detection via sidecar inference server for 3D print analysis.
 
-Uses subprocess to call a Python script running on the HOST machine
-(via SSH or direct execution), since the HA container uses musl libc
-which is incompatible with onnxruntime's glibc binaries.
+Requests go over HTTP to the inference server, which runs either as a
+Docker sidecar container (auto-deployed via /var/run/docker.sock) or as
+the companion HA Add-on. It cannot run in-process: the HA container uses
+musl libc, which is incompatible with onnxruntime's glibc binaries.
 """
 
 from __future__ import annotations
@@ -52,16 +53,18 @@ class YOLODetector:
                 ) as response:
                     if response.status == 200:
                         data = await response.json()
-                        if data.get("status") == "ok":
+                        status = data.get("status")
+                        # model_not_loaded is fine — model loads lazily
+                        # on the first /analyze request.
+                        if status in ("ok", "model_not_loaded"):
                             return True, None
-                        return False, f"推理服务器状态异常: {data.get('status')}"
+                        return False, f"推理服务器状态异常: {status}"
                     return False, f"推理服务器返回 HTTP {response.status}"
         except aiohttp.ClientConnectorError:
             return (
                 False,
                 f"无法连接到推理服务器 ({self._base_url})\n"
-                "请确保宿主机上已启动推理服务器:\n"
-                "  python3 inference_server/server.py",
+                "有 Docker socket 会自动拉起侧车容器；无 socket 请去 Add-on Store 安装一次“Bambu Inference”",
             )
         except Exception as err:
             return False, f"连接推理服务器出错: {err}"
@@ -103,7 +106,7 @@ class YOLODetector:
                 "anomaly_detected": False,
                 "anomaly_type": "none",
                 "confidence": 0.0,
-                "description": "推理服务器未启动，请在宿主机运行: python3 inference_server/server.py",
+                "description": "推理服务器未启动（侧车容器/Add-on 未运行），等待自动恢复",
             })
         except Exception as err:
             _LOGGER.error("Inference request error: %s", err)

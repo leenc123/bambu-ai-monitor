@@ -206,7 +206,7 @@ class BambuAICoordinator(DataUpdateCoordinator[BambuMonitorData]):
         self._data.bed_target_temperature = status.bed_target_temperature
         self._data.nozzle_temperature = status.nozzle_temperature
         self._data.nozzle_target_temperature = status.nozzle_target_temperature
-        self._data.remaining_time_min = status.remaining_time_sec // 60
+        self._data.remaining_time_min = status.remaining_time_min
         self._data.layer_num = status.layer_num
         self._data.total_layer_count = status.total_layer_count
         self._data.fan_speed = status.fan_speed
@@ -335,7 +335,10 @@ class BambuAICoordinator(DataUpdateCoordinator[BambuMonitorData]):
 
                     if self._auto_pause_enabled:
                         await self._async_pause_print()
-                        self._consecutive_anomaly_count = 0  # Reset after pause
+                        # Reset state atomically: counter + flag + data fields
+                        self._consecutive_anomaly_count = 0
+                        self._data.anomaly_detected = False
+                        self._data.consecutive_anomaly_count = 0
 
                     # Send notification
                     await self._async_send_notification(result)
@@ -347,7 +350,8 @@ class BambuAICoordinator(DataUpdateCoordinator[BambuMonitorData]):
                     )
                     self._consecutive_anomaly_count = 0
                     self._data.consecutive_anomaly_count = 0
-                    self._data.anomaly_detected = False
+                # Always clear anomaly flag when current frame shows no anomaly
+                self._data.anomaly_detected = False
 
         except Exception as err:
             self._data.last_error = f"Analysis error: {err}"
@@ -445,40 +449,78 @@ class BambuAICoordinator(DataUpdateCoordinator[BambuMonitorData]):
         """Handle printer status update from MQTT callback.
 
         This runs on the paho MQTT thread, NOT the HA event loop.
-        When the printer is actively printing, immediately schedule
-        analysis via the HA event loop (event-driven, not poll-based).
+        All mutations of self._data and HA coordinator calls are
+        posted to the event loop via call_soon_threadsafe to avoid
+        thread-safety violations.
         """
-        prev_status = self._data.printer_status
-        self._data.printer_status = self._map_printer_status(status.gcode_state)
-        self._data.print_progress = status.print_progress
-        self._data.bed_temperature = status.bed_temperature
-        self._data.nozzle_temperature = status.nozzle_temperature
-        self._data.remaining_time_min = status.remaining_time_sec // 60
-        self._data.layer_num = status.layer_num
-        self._data.total_layer_count = status.total_layer_count
+        # Build a snapshot from the MQTT thread (reading PrinterStatus
+        # is safe — it's owned by the MQTT thread at this point).
+        new_status = self._map_printer_status(status.gcode_state)
+        progress = status.print_progress
+        layer_num = status.layer_num
+        total_layer_count = status.total_layer_count
 
         _LOGGER.debug(
             "MQTT callback: gcode_state=%s -> printer_status=%s, progress=%.1f%%, layers=%d/%d",
             status.gcode_state,
-            self._data.printer_status,
-            status.print_progress,
-            status.layer_num,
-            status.total_layer_count,
+            new_status,
+            progress,
+            layer_num,
+            total_layer_count,
         )
 
-        # 打印中 → 立即调度分析，不等 coordinator 的下一次轮询（300s）
-        # 参考 ha-bambulab 的事件驱动模式：MQTT 消息到达立即触发更新
         is_printing = (
-            self._data.printer_status == "running"
-            or status.print_progress > 0
-            or status.layer_num > 0
+            new_status == "running"
+            or progress > 0
+            or layer_num > 0
         )
+
+        # Post data update and optional analysis trigger to the HA event loop.
+        # This is the ONLY thread-safe way to interact with HA from MQTT callbacks.
+        self.hass.loop.call_soon_threadsafe(
+            self._async_apply_status_update,
+            new_status,
+            progress,
+            status.bed_temperature,
+            status.nozzle_temperature,
+            status.remaining_time_min,
+            layer_num,
+            total_layer_count,
+            is_printing,
+        )
+
+    def _async_apply_status_update(
+        self,
+        new_status: str,
+        progress: float,
+        bed_temp: float,
+        nozzle_temp: float,
+        remaining_min: int,
+        layer_num: int,
+        total_layer_count: int,
+        is_printing: bool,
+    ) -> None:
+        """Apply MQTT status update on the HA event loop (thread-safe)."""
+        self._data.printer_status = new_status
+        self._data.print_progress = progress
+        self._data.bed_temperature = bed_temp
+        self._data.nozzle_temperature = nozzle_temp
+        self._data.remaining_time_min = remaining_min
+        self._data.layer_num = layer_num
+        self._data.total_layer_count = total_layer_count
+
+        # This is safe now — we're on the HA event loop
+        self.async_set_updated_data(self._data)
+
         if is_printing and not self._analysis_requested:
             _LOGGER.info(
                 "Printer is printing (progress=%.1f%%), scheduling immediate analysis",
-                status.print_progress,
+                progress,
             )
-            self._schedule_analysis_from_callback()
+            # _schedule_analysis_from_callback normally posts to the event
+            # loop, but we're already ON the event loop here, so call directly.
+            self._analysis_requested = True
+            self.hass.async_create_task(self.async_request_refresh())
 
     async def _async_send_notification(self, result: AIAnalysisResult) -> None:
         """Send a persistent notification with analysis result."""

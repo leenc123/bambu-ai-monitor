@@ -145,14 +145,19 @@ class BambuLanClient:
 
     async def async_connect(self) -> bool:
         """Connect to printer via MQTT."""
+        # Capture loop reference early so _on_disconnect can always
+        # schedule reconnection, even if async_connect fails later.
+        try:
+            self._loop = asyncio.get_event_loop()
+        except RuntimeError:
+            pass
+
         async with self._connection_lock:
             if self._connected:
                 return True
 
             try:
-                loop = asyncio.get_event_loop()
-
-                self._loop = asyncio.get_event_loop()
+                loop = self._loop
 
                 # 1. Create client — same config as bambulabs_api (works in Docker)
                 self._client = mqtt.Client(
@@ -422,6 +427,7 @@ class BambuLanClient:
         retry_count = 0
         while self._should_reconnect and self._connected:
             # Wait before checking (initial 2s delay is already in async_connect)
+            retry_count += 1
             await asyncio.sleep(5)
 
             if self._data_received:
@@ -434,18 +440,19 @@ class BambuLanClient:
             if not self._client or not self._connected:
                 break
 
-            retry_count += 1
-
             if self._serial:
-                # Normal case: serial known, send to exact topic
+                # Normal case: serial known, send 'start' to exact topic
                 request_topic = f"device/{self._serial}/request"
+                # Increment sequence_id to prevent printer MQTT broker
+                # from deduplicating repeated retry commands.
+                seq_id = str(retry_count)
                 self._client.publish(
                     request_topic,
-                    BambuCommands.build_push_all_command(),
+                    BambuCommands.build_start_push_command(sequence_id=seq_id),
                     qos=0,
                 )
                 _LOGGER.info(
-                    "Push retry #%d: re-sent pushall to %s (no data yet)",
+                    "Push retry #%d: re-sent start to %s (no data yet)",
                     retry_count,
                     request_topic,
                 )
@@ -453,13 +460,14 @@ class BambuLanClient:
                 # Serial not discovered yet — keep trying candidates
                 for candidate in ["0", "001", "000"]:
                     candidate_topic = f"device/{candidate}/request"
+                    seq_id = str(retry_count)
                     self._client.publish(
                         candidate_topic,
-                        BambuCommands.build_push_all_command(),
+                        BambuCommands.build_start_push_command(sequence_id=seq_id),
                         qos=0,
                     )
                 _LOGGER.info(
-                    "Push retry #%d: pushall to candidates (serial unknown)",
+                    "Push retry #%d: sent start to candidates (serial unknown)",
                     retry_count,
                 )
 
@@ -503,21 +511,22 @@ class BambuLanClient:
                 continue
 
             _LOGGER.warning(
-                "Watchdog fired: no data for %.0fs, re-sending pushall",
+                "Watchdog fired: no data for %.0fs, sending start",
                 elapsed,
             )
+            seq_id = str(int(time.time()))
             if self._serial:
                 request_topic = f"device/{self._serial}/request"
                 self._client.publish(
                     request_topic,
-                    BambuCommands.build_push_all_command(),
+                    BambuCommands.build_start_push_command(sequence_id=seq_id),
                     qos=0,
                 )
             else:
                 for candidate in ["0", "001", "000"]:
                     self._client.publish(
                         f"device/{candidate}/request",
-                        BambuCommands.build_push_all_command(),
+                        BambuCommands.build_start_push_command(sequence_id=seq_id),
                         qos=0,
                     )
             # Reset timer so we don't spam on every 10s check
@@ -579,7 +588,9 @@ class BambuLanClient:
             )
             return
 
-        self._status = parse_printer_status(payload)
+        # Merge with previous status: Bambu pushes incremental updates,
+        # so partial messages must not wipe out fields like progress.
+        self._status = parse_printer_status(payload, self._status)
 
         # Track data arrival (stops push retry, resets watchdog)
         self._last_data_time = time.time()
@@ -591,12 +602,16 @@ class BambuLanClient:
             )
 
         # Log printer status for diagnosis
+        _print_data = payload.get("print") or {}
         _LOGGER.debug(
-            "Parsed status: gcode_state=%s, progress=%s, layers=%s/%s",
+            "Parsed status: gcode_state=%s, progress=%s, layers=%s/%s, "
+            "remaining=%sm, print_keys=%s",
             self._status.gcode_state,
             self._status.print_progress,
             self._status.layer_num,
             self._status.total_layer_count,
+            self._status.remaining_time_min,
+            sorted(_print_data.keys()),
         )
 
         # Extract serial from topic if not configured

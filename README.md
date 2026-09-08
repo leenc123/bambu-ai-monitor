@@ -5,7 +5,7 @@
 
 Home Assistant 自定义集成，通过 YOLOv8 视觉 AI 实时监测拓竹（Bambu Lab）3D 打印异常，连续确认后自动暂停防止打印失败。
 
-> **当前版本**: 0.1.3
+> **当前版本**: 0.2.0
 
 ## 功能
 
@@ -14,9 +14,9 @@ Home Assistant 自定义集成，通过 YOLOv8 视觉 AI 实时监测拓竹（Ba
 - **连续确认机制**：连续 N 帧（默认 2 次）检测到异常且置信度超过阈值才触发暂停，有效防误报
 - **自动暂停**：达到连续检测阈值后自动暂停打印（可单独开关）
 - **本地推理**：YOLO ONNX 模型在宿主机本地运行，**无需云端 API**，零费用
-- **推理服务一键部署**：
-  - Docker 环境挂载了 `/var/run/docker.sock` → **全自动**，零操作
-  - 无 Docker socket → 自动写安装脚本到共享目录，用户跑一次命令
+- **推理服务免手动部署**（无宿主机 systemd）：
+  - 有 `/var/run/docker.sock` → **全自动**拉起侧车容器，零操作
+  - 无 socket（HA OS）→ 去 Add-on Store 安装一次“Bambu Inference”，纯 UI 点击
 - **MQTT 智能重连**：TCP Ping 探测 + 阶梯退避（10s → 30s → 60s → 5min）
 - **实时状态**：打印进度、热床/喷嘴温度、剩余时间、层进度
 - **异常标注画面**：摄像头实体显示 YOLO 检测框标注结果
@@ -35,18 +35,18 @@ Home Assistant 自定义集成，通过 YOLOv8 视觉 AI 实时监测拓竹（Ba
 │  │  HTTP ←→ 推理服务 (YOLO 分析)     │   │
 │  │                                   │   │
 │  │  ┌─ service_manager.py ────────┐ │   │
-│  │  │  Docker socket → Alpine 容器  │ │   │
-│  │  │   → chroot 宿主机安装 +       │ │   │
-│  │  │     systemd 服务              │ │   │
-│  │  │  无 socket → 写脚本到 /config │ │   │
+│  │  │  Docker socket → 拉起侧车容器 │ │   │
+│  │  │   bambu-ai-inference (Debian) │ │   │
+│  │  │  无 socket → 提示装 Add-on    │ │   │
+│  │  │   （配置流 inference 步骤）   │ │   │
 │  │  └─────────────────────────────┘ │   │
 │  └───────────────────────────────────┘   │
 │                     │                     │
 │                     ▼ HTTP :19530         │
 │  ┌───────────────────────────────────┐   │
-│  │  推理服务 (宿主机 systemd)          │   │
+│  │  推理服务 (侧车容器 / Add-on)       │   │
 │  │  YOLOv8 ONNX Runtime             │   │
-│  │  开机自启 / 崩溃自动重启          │   │
+│  │  RestartPolicy=always / 开机自启  │   │
 │  │  /analyze   → JSON 检测结果      │   │
 │  │  /visualize → 标注框 JPEG        │   │
 │  │  /health    → 健康检查           │   │
@@ -115,11 +115,11 @@ Home Assistant → 设置 → 设备与服务 → 添加集成 → 搜索 **Bamb
 
 | 环境 | 行为 |
 |------|------|
-| **Docker + 挂载了 `/var/run/docker.sock`** | ✅ **全自动** — 通过 Docker API 启动 Alpine 容器，chroot 进入宿主机 namespace 安装依赖、创建 systemd 服务、启动。用户无需任何操作 |
-| **Docker + 未挂载 socket** | 自动写安装脚本到 `/config/install_inference_server.sh`，用户手动执行：`bash /config/install_inference_server.sh` |
-| **HA OS（虚拟机/物理机）** | 同上，脚本写到 `/config/` 目录 |
+| **Docker + 挂载了 `/var/run/docker.sock`** | ✅ **全自动** — 通过 Docker API 拉起 `bambu-ai-inference` 侧车容器（`RestartPolicy: always`），模型自动同步到 `/config/bambu_ai_model`。用户无需任何操作 |
+| **Docker + 未挂载 socket** | 配置流出现 inference 提示页：去 Add-on Store 安装“Bambu Inference”并启动，回来点继续 |
+| **HA OS（虚拟机/物理机）** | 同上，Add-on 方式，一次 UI 点击，开机自启 |
 
-> **推荐挂载 Docker socket**，推理服务安装完全自动化，零手动操作。
+> **推荐挂载 Docker socket**（compose 加一行 `- /var/run/docker.sock:/var/run/docker.sock`），之后全程零操作。HA OS 用户用 Add-on，同样无 SSH/命令行。
 
 安装完成后可在 Home Assistant 中查看 `binary_sensor.inference_server` 确认服务状态。
 
@@ -205,12 +205,8 @@ logger:
 
 检查 `binary_sensor.inference_server`：
 
-- 如果为 **off** 且 Docker socket 已挂载 → 等待 30 秒自动安装完成
-- 如果为 **off** 且未挂载 Docker socket → 在宿主机执行：
-
-```bash
-bash /config/install_inference_server.sh
-```
+- 如果为 **off** 且 Docker socket 已挂载 → 等待约 1 分钟（首次拉镜像），`docker ps` 应能看到 `bambu-ai-inference`
+- 如果为 **off** 且未挂载 Docker socket → 去 设置 → Add-on → 安装并启动“Bambu Inference”（详见 `bambu_inference_addon/README.md`），无需任何宿主机命令
 
 ### 摄像头无画面
 

@@ -34,6 +34,25 @@ class BambuCommands:
         })
 
     @staticmethod
+    def build_start_push_command(sequence_id: str = "0") -> str:
+        """Build MQTT payload to resume/start pushing data.
+
+        Used for watchdog recovery and push retry after initial connect.
+        Unlike pushall (which is a one-shot full dump), 'start' tells
+        the printer to begin/resume publishing incremental updates.
+
+        Args:
+            sequence_id: Increment this on retries to avoid the printer's
+                         MQTT broker deduplicating identical commands.
+        """
+        return json.dumps({
+            "pushing": {
+                "sequence_id": sequence_id,
+                "command": "start",
+            }
+        })
+
+    @staticmethod
     def build_pause_command() -> str:
         """Build MQTT payload to pause the current print."""
         return json.dumps({

@@ -68,5 +68,24 @@
         "name": "YOLO Detection View"
       }
     }
+  },
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect Bambu printer",
+        "description": "Enter printer connection details"
+      },
+      "inference": {
+        "title": "Install inference service (one-time)",
+        "description": "No Docker auto-deploy detected. Install “Bambu Inference” from Settings → Add-ons → Add-on Store, start it, then press Continue."
+      }
+    },
+    "error": {
+      "cannot_connect": "Cannot connect to printer",
+      "inference_not_ready": "Inference server still unreachable, start the Add-on first"
+    },
+    "abort": {
+      "already_configured": "Printer already configured"
+    }
   }
 }

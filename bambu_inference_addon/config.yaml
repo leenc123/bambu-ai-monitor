@@ -1,0 +1,24 @@
+name: Bambu Inference
+version: 0.2.0
+slug: bambu_inference
+description: YOLOv8 ONNX inference server for Bambu AI Print Monitor (no host systemd needed)
+arch:
+  - aarch64
+  - amd64
+# NOTE: armv7 omitted — onnxruntime ships no 32-bit ARM wheels.
+startup: application
+boot: auto
+ports:
+  19530/tcp: 19530
+ports_description:
+  19530/tcp: YOLO inference HTTP API
+map:
+  - share:rw
+  - data:rw
+options:
+  port: 19530
+  model_url: ""
+schema:
+  port: int
+  model_url: str?
+image: ghcr.io/leenc123/{arch}-bambu-inference

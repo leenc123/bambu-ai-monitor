@@ -7,6 +7,7 @@ import logging
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import ConfigEntryNotReady
+from homeassistant.helpers.device_registry import DeviceEntry
 
 from .const import (
     DOMAIN,
@@ -23,6 +24,8 @@ PLATFORMS = [
     "select",
     "number",
     "camera",
+    "sensor",
+    "binary_sensor",
 ]
 
 type BambuAIConfigEntry = ConfigEntry[BambuAICoordinator]
@@ -98,6 +101,20 @@ async def async_unload_entry(hass: HomeAssistant, entry: BambuAIConfigEntry) -> 
         await coordinator.async_cleanup()
 
     return unload_ok
+
+
+async def async_remove_config_entry_device(
+    hass: HomeAssistant, entry: BambuAIConfigEntry, device_entry: DeviceEntry
+) -> bool:
+    """Allow user to delete the device from the device page.
+
+    只要实现这个函数，HA 就会在设备页三点菜单里显示 “删除” 按钮。
+    返回 True 即允许删除。
+    本集成是单 config entry 对应单个设备 (identifiers={(DOMAIN, serial)})，
+    删除 device 后 config entry 还在，重启后设备会重建。
+    想彻底移除打印机请再到 集成页面删除对应配置项。
+    """
+    return True
 
 
 async def async_reload_entry(hass: HomeAssistant, entry: BambuAIConfigEntry) -> None:

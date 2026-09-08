@@ -1,29 +1,54 @@
-"""Inference server status monitor and auto-installer.
+"""Inference server status monitor and auto-deployer.
 
-Auto-installs the inference server on the Docker HOST by:
-1. Using Docker socket (if mounted) → runs install in host namespace
-2. Fallback: writes install script to /config/ for manual one-command execution
+No host systemd / chroot / manual bash required:
+
+1. Docker socket available (``/var/run/docker.sock``) → pull/run a
+   sidecar inference container (Debian/glibc based, onnxruntime works)
+   with ``RestartPolicy: always``. Fully automatic, zero user action.
+2. No Docker socket (HA OS etc.) → the user installs the companion
+   Add-on once from the Add-on Store (UI click, no SSH). This manager
+   then just waits for ``/health`` to become reachable.
+
+The HA container itself is Alpine/musl based, so onnxruntime cannot run
+in-process — that is why inference lives in a sidecar/Add-on instead of
+``manifest.json`` requirements.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import os
+import shutil
 from pathlib import Path
 
 _LOGGER = logging.getLogger(__name__)
 
 DEFAULT_PORT = 19530
 SCRIPT_DIR = Path(__file__).parent
-SERVER_SCRIPT = SCRIPT_DIR / "inference_server" / "server.py"
-INSTALL_SCRIPT = SCRIPT_DIR / "inference_server" / "install.py"
+MODEL_SRC = SCRIPT_DIR / "model" / "best.onnx"
 DOCKER_SOCKET = "/var/run/docker.sock"
+DOCKER_API = "http://localhost"
+
+# Prebuilt inference image (Debian/glibc + onnxruntime + server.py).
+# Advanced users may override via env var, e.g. a local mirror.
+INFERENCE_IMAGE = os.environ.get(
+    "BAMBU_INFERENCE_IMAGE",
+    "ghcr.io/leenc123/bambu-inference:latest",
+)
+CONTAINER_NAME = "bambu-ai-inference"
+
+# Staged model dir shared with the sidecar container.
+# /config is on a Docker volume, so the sidecar can bind-mount it.
+MODEL_DIR = Path("/config/bambu_ai_model")
+MODEL_DST = MODEL_DIR / "best.onnx"
+
+# Where the Add-on / sidecar is expected to listen (informational).
+ADDON_DOC_URL = "https://github.com/leenc123/bambu-ai-monitor/tree/main/bambu_inference_addon"
 
 
 class InferenceServerManager:
-    """Check inference server status; auto-install on host via Docker socket."""
+    """Check inference server health; auto-deploy sidecar via Docker socket."""
 
     def __init__(
         self,
@@ -35,10 +60,9 @@ class InferenceServerManager:
         self._inference_port = inference_port
         self._base_url = f"http://{inference_host}:{inference_port}"
         self._last_known_running = False
-        self._model_path = model_path or str(
-            SCRIPT_DIR / "model" / "best.onnx"
-        )
-        self._install_script_path = "/config/install_inference_server.sh"
+        self._model_path = model_path or str(MODEL_SRC)
+        # "external" | "sidecar" | "addon_required"
+        self._deploy_mode = "external"
 
     @property
     def is_running(self) -> bool:
@@ -49,11 +73,21 @@ class InferenceServerManager:
         return self._inference_port
 
     @property
-    def install_script_path(self) -> str:
-        return self._install_script_path
+    def deploy_mode(self) -> str:
+        """How inference is provided: external / sidecar / addon_required."""
+        return self._deploy_mode
+
+    @property
+    def docker_available(self) -> bool:
+        return os.path.exists(DOCKER_SOCKET)
 
     async def async_check_health(self) -> bool:
-        """Check if inference server is reachable via HTTP /health."""
+        """Check if inference server is reachable via HTTP /health.
+
+        Accepts both "ok" and "model_not_loaded" as running — the model
+        is loaded lazily on the first /analyze request, so an unloaded
+        model does not mean the server is down.
+        """
         try:
             import aiohttp
             async with aiohttp.ClientSession() as session:
@@ -63,7 +97,10 @@ class InferenceServerManager:
                 ) as resp:
                     if resp.status == 200:
                         data = await resp.json()
-                        self._last_known_running = data.get("status") == "ok"
+                        status = data.get("status", "")
+                        self._last_known_running = (
+                            status == "ok" or status == "model_not_loaded"
+                        )
                         return self._last_known_running
         except Exception:
             pass
@@ -71,231 +108,204 @@ class InferenceServerManager:
         return False
 
     async def async_ensure_running(self) -> bool:
-        """Check server; if not running, auto-install on host."""
-        healthy = await self.async_check_health()
-        if healthy:
+        """Check server; if not running, auto-deploy sidecar if possible."""
+        if await self.async_check_health():
             _LOGGER.info("Inference server running at %s", self._base_url)
             return True
 
-        # Strategy 1: auto-install via Docker socket (no user action needed)
-        if os.path.exists(DOCKER_SOCKET):
-            _LOGGER.info("Docker socket found, auto-installing on host...")
-            ok = await self._async_install_via_docker()
-            if ok:
-                for _ in range(30):
+        # Strategy 1: Docker socket → run sidecar container (zero user action)
+        if self.docker_available:
+            _LOGGER.info(
+                "Docker socket found, deploying sidecar container %s ...",
+                CONTAINER_NAME,
+            )
+            self._deploy_mode = "sidecar"
+            if await self._async_ensure_sidecar():
+                for _ in range(60):
                     if await self.async_check_health():
-                        _LOGGER.info("Inference server installed and running!")
+                        _LOGGER.info("Sidecar inference server is running!")
                         return True
-                    await asyncio.sleep(1)
-                _LOGGER.warning("Server started but not yet healthy, will retry")
+                    await asyncio.sleep(2)
+                _LOGGER.warning(
+                    "Sidecar started but /health not ready yet, will retry later"
+                )
                 return False
+            _LOGGER.error("Failed to deploy sidecar container")
+            return False
 
-        # Strategy 2: write install script for manual one-command execution
-        await self._async_write_install_script()
+        # Strategy 2: no socket → user installs the Add-on once (UI click).
+        self._deploy_mode = "addon_required"
         _LOGGER.warning(
-            "Inference server not running.\n"
-            "Run this ONE command on the host:\n"
-            "  bash %s",
-            self._install_script_path,
+            "Inference server not running and no Docker socket. "
+            "Install the 'Bambu Inference' Add-on from the Add-on Store once "
+            "(%s), then it starts automatically. Waiting for %s ...",
+            ADDON_DOC_URL,
+            self._base_url,
         )
         return False
 
     async def async_restart(self) -> bool:
-        """Restart the server on the host."""
-        docker_ok = await self._async_docker_exec(
-            "systemctl restart yolo-inference-server 2>/dev/null || "
-            f"(pkill -f 'server.py' 2>/dev/null; sleep 1; "
-            f"nohup python3 /opt/bambu-ai-inference/server.py "
-            f"--port {self._inference_port} "
-            f"--model /opt/bambu-ai-inference/best.onnx "
-            f"> /var/log/yolo-inference-server.log 2>&1 &)"
-        )
-        if docker_ok:
-            for _ in range(15):
-                if await self.async_check_health():
-                    return True
-                await asyncio.sleep(1)
+        """Restart the sidecar container (no-op without Docker socket)."""
+        if not self.docker_available:
+            _LOGGER.warning("No Docker socket, cannot restart sidecar automatically")
+            return False
+        if not await self._docker_post(f"/containers/{CONTAINER_NAME}/restart"):
+            return False
+        for _ in range(15):
+            if await self.async_check_health():
+                return True
+            await asyncio.sleep(1)
         return False
 
-    # ── Docker socket auto-install ─────────────────────────────────
+    # ── Sidecar lifecycle via Docker Engine API ──────────────────────
 
-    async def _async_install_via_docker(self) -> bool:
-        """Auto-install inference server on host via Docker socket.
+    async def _async_ensure_sidecar(self) -> bool:
+        """Pull image if needed, create + start the sidecar container."""
+        try:
+            self._stage_model()
+        except Exception as err:
+            _LOGGER.error("Failed to stage model file: %s", err)
+            return False
 
-        Runs a privileged container that mounts the host rootfs and executes
-        the install script in the host's namespace (chroot).
-        """
-        script = self._generate_install_script()
-        install_cmd = "/tmp/install.sh"
-
-        # Write install script to /config (visible from host too)
-        Path(self._install_script_path).write_text(script)
-        Path(self._install_script_path).chmod(0o755)
-
-        # Build the docker run command
-        cmd = (
-            f"cp {self._install_script_path} {install_cmd} && "
-            f"chmod +x {install_cmd} && bash {install_cmd}"
+        containers = await self._docker_get("/containers/json?all=1")
+        if containers is None:
+            return False
+        existing = next(
+            (
+                c
+                for c in containers
+                if CONTAINER_NAME in [n.lstrip("/") for n in c.get("Names", [])]
+            ),
+            None,
         )
-        return await self._async_docker_exec(cmd)
 
-    async def _async_docker_exec(self, command: str) -> bool:
-        """Run a command on the host via Docker socket.
+        if existing:
+            state = existing.get("State", "")
+            container_id = existing.get("Id", "")
+            if state != "running":
+                _LOGGER.info("Starting existing sidecar container ...")
+                if not await self._docker_post(f"/containers/{container_id}/start"):
+                    return False
+            return True
 
-        Uses a lightweight Alpine container with:
-          --pid=host    → access host process namespace
-          -v /:/host    → mount host rootfs
-          chroot /host  → execute in host namespace
-        """
+        # Create new container; pull image first on 404.
+        payload = {
+            "Image": INFERENCE_IMAGE,
+            "name": CONTAINER_NAME,
+            "ExposedPorts": {"19530/tcp": {}},
+            "Env": [f"MODEL_PATH=/model/best.onnx", f"PORT={self._inference_port}"],
+            "HostConfig": {
+                "Binds": [f"{MODEL_DIR}:/model:ro"],
+                "PortBindings": {
+                    "19530/tcp": [{"HostPort": str(self._inference_port)}]
+                },
+                "RestartPolicy": {"Name": "always"},
+            },
+        }
+        container_id = await self._docker_create(payload)
+        if container_id is None:
+            _LOGGER.info("Image %s missing, pulling ...", INFERENCE_IMAGE)
+            if not await self._docker_pull(INFERENCE_IMAGE):
+                return False
+            container_id = await self._docker_create(payload)
+            if container_id is None:
+                return False
+
+        _LOGGER.info("Starting new sidecar container %s ...", container_id[:12])
+        return await self._docker_post(f"/containers/{container_id}/start")
+
+    def _stage_model(self) -> None:
+        """Copy best.onnx to /config/bambu_ai_model/ for the sidecar mount."""
+        src = Path(self._model_path)
+        if not src.exists():
+            src = MODEL_SRC
+        if not src.exists():
+            raise FileNotFoundError(f"Model not found: {src}")
+        MODEL_DIR.mkdir(parents=True, exist_ok=True)
+        if not MODEL_DST.exists() or MODEL_DST.stat().st_size != src.stat().st_size:
+            shutil.copy2(src, MODEL_DST)
+            _LOGGER.info("Model staged at %s", MODEL_DST)
+
+    # ── Minimal Docker Engine API client (Unix socket) ───────────────
+
+    async def _docker_get(self, path: str):
         try:
             import aiohttp
 
-            # Connect to Docker daemon via Unix socket
             connector = aiohttp.UnixConnector(path=DOCKER_SOCKET)
             async with aiohttp.ClientSession(connector=connector) as session:
-                # 1. Create container
-                create_payload = {
-                    "Image": "alpine:latest",
-                    "Cmd": ["sh", "-c", f"chroot /host sh -c '{command}'"],
-                    "HostConfig": {
-                        "PidMode": "host",
-                        "Binds": ["/:/host:rslave"],
-                        "NetworkMode": "host",
-                        "AutoRemove": True,
-                    },
-                }
-                async with session.post(
-                    "http://localhost/v1.41/containers/create",
-                    json=create_payload,
+                async with session.get(
+                    DOCKER_API + f"/v1.41{path}",
                     timeout=aiohttp.ClientTimeout(total=30),
                 ) as resp:
-                    if resp.status not in (200, 201):
-                        text = await resp.text()
-                        _LOGGER.error("Docker create failed: %s", text[:300])
-                        return False
-                    data = await resp.json()
-                    container_id = data["Id"]
-
-                # 2. Start container
-                async with session.post(
-                    f"http://localhost/v1.41/containers/{container_id}/start",
-                    timeout=aiohttp.ClientTimeout(total=120),
-                ) as resp:
-                    if resp.status not in (200, 204):
-                        text = await resp.text()
-                        _LOGGER.error("Docker start failed: %s", text[:300])
-                        return False
-
-                # 3. Wait for completion
-                async with session.post(
-                    f"http://localhost/v1.41/containers/{container_id}/wait",
-                    timeout=aiohttp.ClientTimeout(total=120),
-                ) as resp:
                     if resp.status == 200:
-                        result = await resp.json()
-                        code = result.get("StatusCode", -1)
-                        if code == 0:
-                            return True
-                        _LOGGER.error("Install exited with code %s", code)
-
-                # 4. Get logs on failure
-                async with session.get(
-                    f"http://localhost/v1.41/containers/{container_id}/logs?stdout=true&stderr=true",
-                    timeout=aiohttp.ClientTimeout(total=10),
-                ) as resp:
-                    log_text = await resp.text()
-                    _LOGGER.error("Install failed. Logs:\n%s", log_text[:1000])
-
-        except ImportError:
-            _LOGGER.error("aiohttp required for Docker auto-install")
-        except FileNotFoundError:
-            _LOGGER.debug("Docker socket not accessible")
+                        return await resp.json()
+                    _LOGGER.error("Docker GET %s → HTTP %s", path, resp.status)
         except Exception as err:
-            _LOGGER.error("Docker auto-install error: %s", err)
+            _LOGGER.error("Docker API error: %s", err)
+        return None
 
+    async def _docker_post(self, path: str, payload: dict | None = None) -> bool:
+        try:
+            import aiohttp
+
+            connector = aiohttp.UnixConnector(path=DOCKER_SOCKET)
+            async with aiohttp.ClientSession(connector=connector) as session:
+                async with session.post(
+                    DOCKER_API + f"/v1.41{path}",
+                    json=payload,
+                    timeout=aiohttp.ClientTimeout(total=120),
+                ) as resp:
+                    if resp.status in (200, 201, 204):
+                        return True
+                    text = await resp.text()
+                    _LOGGER.error(
+                        "Docker POST %s → HTTP %s: %s", path, resp.status, text[:300]
+                    )
+        except Exception as err:
+            _LOGGER.error("Docker API error: %s", err)
         return False
 
-    # ── Fallback: write install script ─────────────────────────────
-
-    async def _async_write_install_script(self) -> None:
-        """Write self-contained install script to /config/ (shared with host)."""
-        script = self._generate_install_script()
+    async def _docker_create(self, payload: dict) -> str | None:
+        """Create container, return id. None on failure (incl. missing image)."""
         try:
-            Path(self._install_script_path).write_text(script)
-            Path(self._install_script_path).chmod(0o755)
-            _LOGGER.info(
-                "Install script written to %s", self._install_script_path
-            )
+            import aiohttp
+
+            connector = aiohttp.UnixConnector(path=DOCKER_SOCKET)
+            async with aiohttp.ClientSession(connector=connector) as session:
+                async with session.post(
+                    DOCKER_API + "/v1.41/containers/create?name=" + CONTAINER_NAME,
+                    json=payload,
+                    timeout=aiohttp.ClientTimeout(total=60),
+                ) as resp:
+                    if resp.status in (200, 201):
+                        data = await resp.json()
+                        return data["Id"]
+                    text = await resp.text()
+                    _LOGGER.warning("Docker create → HTTP %s: %s", resp.status, text[:300])
         except Exception as err:
-            _LOGGER.error("Failed to write install script: %s", err)
+            _LOGGER.error("Docker create error: %s", err)
+        return None
 
-    def _generate_install_script(self) -> str:
-        """Generate the install script content (auto-detects host paths)."""
-        return f"""#!/bin/bash
-# Bambu AI Monitor - Inference Server Installer
-# Auto-generated. Run ONCE on the host:
-#   bash {self._install_script_path}
+    async def _docker_pull(self, image: str) -> bool:
+        try:
+            import aiohttp
 
-set -e
-
-# Auto-detect plugin directory from script's own location
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PLUGIN_DIR="$SCRIPT_DIR/custom_components/bambu_ai_monitor"
-SERVER_SRC="$PLUGIN_DIR/inference_server/server.py"
-MODEL_SRC="$PLUGIN_DIR/model/best.onnx"
-INSTALL_SRC="$PLUGIN_DIR/inference_server/install.py"
-
-echo "=== Installing inference server dependencies ==="
-pip3 install onnxruntime pillow numpy -q
-
-echo "=== Deploying server files ==="
-mkdir -p /opt/bambu-ai-inference
-
-if [ -f "$SERVER_SRC" ]; then
-  cp "$SERVER_SRC" /opt/bambu-ai-inference/server.py
-  echo "server.py copied"
-else
-  echo "Warning: server.py not found at $SERVER_SRC"
-fi
-
-if [ -f "$MODEL_SRC" ]; then
-  cp "$MODEL_SRC" /opt/bambu-ai-inference/best.onnx
-  echo "best.onnx copied"
-else
-  echo "Warning: best.onnx not found at $MODEL_SRC"
-fi
-
-[ -f "$INSTALL_SRC" ] && cp "$INSTALL_SRC" /opt/bambu-ai-inference/install.py
-
-echo "=== Installing systemd service ==="
-PYTHON3=$(command -v python3)
-cat > /etc/systemd/system/yolo-inference-server.service << SERVICEEOF
-[Unit]
-Description=YOLO Inference Server for Bambu AI Monitor
-After=network.target
-
-[Service]
-Type=simple
-ExecStart=$PYTHON3 /opt/bambu-ai-inference/server.py --port {self._inference_port} --model /opt/bambu-ai-inference/best.onnx
-WorkingDirectory=/opt/bambu-ai-inference
-Restart=on-failure
-RestartSec=5
-StandardOutput=append:/var/log/yolo-inference-server.log
-StandardError=append:/var/log/yolo-inference-server.log
-
-[Install]
-WantedBy=multi-user.target
-SERVICEEOF
-
-echo "=== Starting service ==="
-systemctl daemon-reload
-systemctl enable yolo-inference-server
-systemctl restart yolo-inference-server
-
-echo ""
-echo "=== Done! ==="
-echo "Service: yolo-inference-server"
-echo "Status: $(systemctl is-active yolo-inference-server)"
-echo "Port: {self._inference_port}"
-echo "Logs: journalctl -u yolo-inference-server -f"
-"""
+            connector = aiohttp.UnixConnector(path=DOCKER_SOCKET)
+            async with aiohttp.ClientSession(connector=connector) as session:
+                repo, _, tag = image.partition(":")
+                params = f"fromImage={repo}&tag={tag or 'latest'}"
+                async with session.post(
+                    DOCKER_API + f"/v1.41/images/create?{params}",
+                    timeout=aiohttp.ClientTimeout(total=600),
+                ) as resp:
+                    if resp.status == 200:
+                        # Consume progress stream
+                        await resp.read()
+                        _LOGGER.info("Image %s pulled", image)
+                        return True
+                    text = await resp.text()
+                    _LOGGER.error("Docker pull failed: %s", text[:300])
+        except Exception as err:
+            _LOGGER.error("Docker pull error: %s", err)
+        return False

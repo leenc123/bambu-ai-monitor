@@ -81,6 +81,9 @@ class BambuAIMonitorConfigFlow(ConfigFlow, domain=DOMAIN):
         self._printer_model: str | None = None
         self._camera_port: int | None = None
         self._yolo_model_path: str | None = None
+        self._pending_data: dict[str, Any] | None = None
+        self._pending_options: dict[str, Any] | None = None
+        self._pending_title: str = ""
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
@@ -129,18 +132,28 @@ class BambuAIMonitorConfigFlow(ConfigFlow, domain=DOMAIN):
                 )
                 self._abort_if_unique_id_configured()
 
-                return self.async_create_entry(
-                    title=f"Bambu {printer_model} ({host})",
-                    data=data,
-                    options={
-                        CONF_ANALYSIS_INTERVAL: DEFAULT_ANALYSIS_INTERVAL,
-                        CONF_CONFIDENCE_THRESHOLD: DEFAULT_CONFIDENCE_THRESHOLD,
-                        CONF_AUTO_PAUSE: DEFAULT_AUTO_PAUSE,
-                        CONF_CONSECUTIVE_DETECTIONS: DEFAULT_CONSECUTIVE_DETECTIONS,
-                        CONF_INFERENCE_HOST: inference_host,
-                        CONF_INFERENCE_PORT: inference_port,
-                    },
-                )
+                options = {
+                    CONF_ANALYSIS_INTERVAL: DEFAULT_ANALYSIS_INTERVAL,
+                    CONF_CONFIDENCE_THRESHOLD: DEFAULT_CONFIDENCE_THRESHOLD,
+                    CONF_AUTO_PAUSE: DEFAULT_AUTO_PAUSE,
+                    CONF_CONSECUTIVE_DETECTIONS: DEFAULT_CONSECUTIVE_DETECTIONS,
+                    CONF_INFERENCE_HOST: inference_host,
+                    CONF_INFERENCE_PORT: inference_port,
+                }
+                title = f"Bambu {printer_model} ({host})"
+
+                # Docker socket → sidecar auto-deploys silently, no extra click.
+                # Otherwise, if inference is already reachable, proceed directly.
+                if await self._inference_ready_or_auto(inference_host, inference_port):
+                    return self.async_create_entry(
+                        title=title, data=data, options=options
+                    )
+
+                # No socket + not reachable → one-time Add-on install prompt.
+                self._pending_data = data
+                self._pending_options = options
+                self._pending_title = title
+                return await self.async_step_inference()
 
         return self.async_show_form(
             step_id="user",
@@ -262,6 +275,68 @@ class BambuAIMonitorConfigFlow(ConfigFlow, domain=DOMAIN):
     ) -> BambuAIMonitorOptionsFlow:
         """Get the options flow for this handler."""
         return BambuAIMonitorOptionsFlow()
+
+    async def async_step_inference(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """One-time prompt: install the Add-on, then continue.
+
+        Shown only when there is no Docker socket and the inference
+        server is not reachable. Submitting re-checks /health: reachable
+        → create entry, otherwise stay on this step with an error.
+        """
+        errors: dict[str, str] = {}
+        if user_input is not None and self._pending_data is not None:
+            host = self._pending_data.get(CONF_INFERENCE_HOST, DEFAULT_INFERENCE_HOST)
+            port = self._pending_data.get(CONF_INFERENCE_PORT, DEFAULT_INFERENCE_PORT)
+            if await self._async_check_inference(host, port):
+                data = self._pending_data
+                self._pending_data = None
+                return self.async_create_entry(
+                    title=self._pending_title,
+                    data=data,
+                    options=self._pending_options or {},
+                )
+            errors["base"] = "inference_not_ready"
+
+        return self.async_show_form(
+            step_id="inference",
+            data_schema=vol.Schema({}),
+            errors=errors,
+            description_placeholders={
+                "host": str(self._pending_data.get(CONF_INFERENCE_HOST, ""))
+                if self._pending_data
+                else DEFAULT_INFERENCE_HOST,
+                "port": str(self._pending_data.get(CONF_INFERENCE_PORT, ""))
+                if self._pending_data
+                else str(DEFAULT_INFERENCE_PORT),
+            },
+        )
+
+    async def _inference_ready_or_auto(self, host: str, port: int) -> bool:
+        """True if setup can proceed without the Add-on prompt step."""
+        import os
+
+        if os.path.exists("/var/run/docker.sock"):
+            return True
+        return await self._async_check_inference(host, port)
+
+    async def _async_check_inference(self, host: str, port: int) -> bool:
+        """Check inference /health without pulling extra dependencies."""
+        try:
+            import aiohttp
+
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    f"http://{host}:{port}/health",
+                    timeout=aiohttp.ClientTimeout(total=5),
+                ) as resp:
+                    if resp.status != 200:
+                        return False
+                    data = await resp.json()
+                    return data.get("status") in ("ok", "model_not_loaded")
+        except Exception:
+            return False
 
     async def _test_printer_connection(
         self, host: str, access_code: str

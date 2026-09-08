@@ -1,6 +1,10 @@
 {
   "config": {
     "step": {
+      "inference": {
+        "title": "安装推理服务（仅需一次）",
+        "description": "未检测到 Docker 自动部署，请去 设置 → Add-on → Add-on Store 安装“Bambu Inference”并启动（端口 {port}），然后点继续。已安装好点继续即可。"
+      },
       "user": {
         "title": "连接拓竹打印机",
         "description": "输入打印机连接信息和 YOLO 模型路径",
@@ -17,6 +21,7 @@
       }
     },
     "error": {
+      "inference_not_ready": "推理服务仍不可达，请确认 Add-on 已启动后再继续",
       "cannot_connect": "无法连接到打印机",
       "invalid_auth": "访问码错误",
       "already_configured": "打印机已配置",
