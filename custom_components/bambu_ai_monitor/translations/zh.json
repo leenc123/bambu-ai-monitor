@@ -12,7 +12,8 @@
     },
     "binary_sensor": {
       "anomaly_detected": { "name": "检测到异常" },
-      "printer_online": { "name": "打印机在线" }
+      "printer_online": { "name": "打印机在线" },
+      "inference_server": { "name": "推理服务运行中" }
     },
     "button": {
       "analyze_now": { "name": "立即分析" }

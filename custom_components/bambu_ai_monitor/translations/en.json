@@ -32,6 +32,9 @@
       },
       "printer_online": {
         "name": "Printer Online"
+      },
+      "inference_server": {
+        "name": "Inference Server Running"
       }
     },
     "button": {
