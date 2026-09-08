@@ -1,0 +1,82 @@
+{
+  "entity": {
+    "sensor": {
+      "print_status": { "name": "列印狀態" },
+      "print_progress": { "name": "列印進度" },
+      "bed_temperature": { "name": "熱床溫度" },
+      "nozzle_temperature": { "name": "噴嘴溫度" },
+      "remaining_time": { "name": "剩餘時間" },
+      "last_analysis": { "name": "最近分析結果" },
+      "anomaly_type": { "name": "異常類型" },
+      "layer_progress": { "name": "層進度" }
+    },
+    "binary_sensor": {
+      "anomaly_detected": { "name": "偵測到異常" },
+      "printer_online": { "name": "印表機在線" },
+      "inference_server": { "name": "推理服務運行中" }
+    },
+    "button": {
+      "analyze_now": { "name": "立即分析" }
+    },
+    "switch": {
+      "auto_pause": { "name": "異常自動暫停" }
+    },
+    "select": {
+      "analysis_interval": { "name": "分析間隔" }
+    },
+    "number": {
+      "confidence_threshold": { "name": "置信度閾值" }
+    },
+    "camera": {
+      "annotated_snapshot": { "name": "YOLO 偵測畫面" }
+    }
+  },
+  "config": {
+    "step": {
+      "inference": {
+        "title": "安裝推理服務（僅需一次）",
+        "description": "未偵測到 Docker 自動部署，請前往 設定 → Add-on → Add-on Store 安裝“Bambu Inference”並啟動，然後點繼續。已安裝好點繼續即可。"
+      },
+      "user": {
+        "title": "連接拓竹印表機",
+        "description": "輸入印表機連接資訊和 YOLO 模型路徑",
+        "data": {
+          "host": "印表機 IP 位址",
+          "access_code": "區域網路存取碼",
+          "serial": "印表機序號（可選，自動偵測）",
+          "printer_model": "印表機型號",
+          "camera_port": "鏡頭連接埠（預設: 6000）",
+          "yolo_model_path": "YOLO ONNX 模型路徑",
+          "inference_host": "推理伺服器位址（預設: 127.0.0.1）",
+          "inference_port": "推理伺服器連接埠（預設: 19530）"
+        }
+      }
+    },
+    "error": {
+      "inference_not_ready": "推理服務仍無法連線，請確認 Add-on 已啟動後再繼續",
+      "cannot_connect": "無法連接到印表機",
+      "invalid_auth": "存取碼錯誤",
+      "already_configured": "此印表機已設定",
+      "unknown": "未知錯誤"
+    },
+    "abort": {
+      "already_configured": "此印表機已設定",
+      "reconfigure_successful": "重新設定成功"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "分析選項",
+        "data": {
+          "analysis_interval": "分析間隔",
+          "confidence_threshold": "置信度閾值 (0.0 - 1.0)",
+          "auto_pause": "偵測到異常時自動暫停",
+          "consecutive_detections": "觸發暫停的連續偵測次數",
+          "inference_host": "推理伺服器位址",
+          "inference_port": "推理伺服器連接埠"
+        }
+      }
+    }
+  }
+}
