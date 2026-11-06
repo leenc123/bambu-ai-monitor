@@ -57,5 +57,10 @@ class BambuAICamera(CoordinatorEntity, Camera):
 
     @property
     def should_poll(self) -> bool:
-        """Camera polls for updates."""
-        return True
+        """Do not poll.
+
+        The image is served from the coordinator cache and this entity is a
+        CoordinatorEntity, so it is updated via the coordinator listener.
+        Polling only triggers redundant 30s refresh work.
+        """
+        return False
