@@ -5,7 +5,7 @@
 
 Home Assistant 自定义集成，通过 YOLOv8 视觉 AI 实时监测拓竹（Bambu Lab）3D 打印异常，连续确认后自动暂停防止打印失败。
 
-> **当前版本**: 0.2.3
+> **当前版本**: 0.2.4
 
 ## 功能
 
@@ -165,7 +165,7 @@ curl -s http://localhost:19530/health
 | `sensor.remaining_time` | 剩余时间（分钟） |
 | `sensor.layer_progress` | 当前层 / 总层数 |
 | `sensor.last_analysis` | 最近一次 AI 分析结果描述 |
-| `sensor.anomaly_type` | 检测到的异常类型（炒面/拉丝） |
+| `sensor.anomaly_type` | 检测到的异常类型+置信度（正常 / 炒面/拉丝 87%）；属性 `raw_type`/`confidence` 供自动化判断 |
 
 ### 二元传感器
 
