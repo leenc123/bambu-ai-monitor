@@ -13,14 +13,17 @@ import socket
 import ssl
 import struct
 
-from PIL import Image, ImageFilter
+from PIL import Image, ImageFilter, ImageOps, ImageStat
 
 _LOGGER = logging.getLogger(__name__)
 
 DEFAULT_CAMERA_PORT = 6000
 MAX_IMAGE_SIZE = 1024  # Maximum dimension in pixels
 JPEG_QUALITY = 80
-BLUR_THRESHOLD = 100  # Laplacian variance threshold; below this = blurry
+# Variance below the warn threshold is logged but still analyzed; only very
+# flat/blurry frames (below the hard floor) are skipped entirely.
+BLUR_WARN_THRESHOLD = 100
+BLUR_HARD_FLOOR = 20
 
 
 async def async_capture_snapshot(
@@ -49,14 +52,20 @@ async def async_capture_snapshot(
     # Strategy 1: raw TLS socket (A1 Mini / P1 protocol — the standard Bambu way)
     snapshot = await _async_capture_tls_socket(host, access_code, camera_port, timeout)
     if snapshot:
-        return _prepare_image(snapshot)
+        return await _async_prepare_image(snapshot)
 
     # Strategy 2: HTTP fallback (some printers/firmware support this)
     snapshot = await _async_capture_http(host, access_code, camera_port, timeout)
     if snapshot:
-        return _prepare_image(snapshot)
+        return await _async_prepare_image(snapshot)
 
     return None
+
+
+async def _async_prepare_image(image_bytes: bytes) -> bytes:
+    """Run the CPU-heavy resize/compress step off the event loop."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, _prepare_image, image_bytes)
 
 
 async def _async_capture_tls_socket(
@@ -80,7 +89,7 @@ async def _async_capture_tls_socket(
       4. Read 16-byte header: first 4 bytes = JPEG payload size (LE)
       5. Read payload_size bytes of JPEG data
     """
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
 
     def _capture() -> bytes | None:
         # Build binary auth packet (96 bytes total)
@@ -208,7 +217,7 @@ async def _async_capture_http(
 def _prepare_image(image_bytes: bytes) -> bytes:
     """Resize and compress image for API submission."""
     try:
-        image = Image.open(io.BytesIO(image_bytes))
+        image = ImageOps.exif_transpose(Image.open(io.BytesIO(image_bytes)))
 
         # Convert to RGB if necessary
         if image.mode in ("RGBA", "P", "LA"):
@@ -232,42 +241,45 @@ def _prepare_image(image_bytes: bytes) -> bytes:
         return image_bytes  # Return original if processing fails
 
 
-def check_image_quality(image_bytes: bytes, threshold: int = BLUR_THRESHOLD) -> tuple[bool, float]:
-    """Check image sharpness using Laplacian variance.
+def check_image_quality(
+    image_bytes: bytes, hard_floor: int = BLUR_HARD_FLOOR
+) -> tuple[bool, float]:
+    """Check image sharpness using an edge-filter variance metric.
 
-    Uses PIL's built-in edge detection filter to approximate the Laplacian
-    response, then computes pixel variance. Low variance = blurry image.
+    Uses ``ImageStat`` to compute the variance in C code (the previous
+    implementation looped over every pixel in Python and blocked the event
+    loop).  Frames below ``hard_floor`` are skipped; frames between the
+    floor and ``BLUR_WARN_THRESHOLD`` are logged but still analyzed.
 
     Args:
         image_bytes: JPEG image bytes
-        threshold: Minimum acceptable Laplacian variance (default 100)
+        hard_floor: Minimum acceptable variance (below this = skip)
 
     Returns:
-        Tuple of (is_acceptable, laplacian_variance)
+        Tuple of (should_analyze, variance)
     """
     try:
-        image = Image.open(io.BytesIO(image_bytes)).convert("L")
+        image = ImageOps.exif_transpose(
+            Image.open(io.BytesIO(image_bytes))
+        ).convert("L")
 
-        # Apply edge detection (approximates Laplacian gradient magnitude)
+        # Apply edge detection (approximates the Laplacian gradient magnitude)
         edges = image.filter(ImageFilter.FIND_EDGES)
+        variance = float(ImageStat.Stat(edges).var[0])
 
-        # Compute pixel variance as sharpness metric
-        pixels = list(edges.getdata())
-        n = len(pixels)
-        if n == 0:
-            return False, 0.0
-
-        mean = sum(pixels) / n
-        variance = sum((p - mean) ** 2 for p in pixels) / n
-
-        is_acceptable = variance >= threshold
-        _LOGGER.debug(
-            "Image quality: variance=%.1f, threshold=%d, acceptable=%s",
-            variance,
-            threshold,
-            is_acceptable,
-        )
-        return is_acceptable, variance
+        should_analyze = variance >= hard_floor
+        if not should_analyze:
+            _LOGGER.warning(
+                "Image too blurry (variance=%.1f < %d), skipping detection",
+                variance,
+                hard_floor,
+            )
+        elif variance < BLUR_WARN_THRESHOLD:
+            _LOGGER.debug(
+                "Image on the blurry side (variance=%.1f), analyzing anyway",
+                variance,
+            )
+        return should_analyze, variance
 
     except Exception as err:
         _LOGGER.warning("Failed to check image quality: %s", err)

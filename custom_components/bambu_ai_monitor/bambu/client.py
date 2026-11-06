@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import ast
 import json
 import logging
-import re
 import ssl
 import time
 from typing import Any, Callable
@@ -28,39 +28,32 @@ def _safe_json_loads(payload: bytes) -> dict | None:
     - Python-style ``True``/``False`` instead of ``true``/``false``
     - Mixed encodings (latin-1 bytes in utf-8 text)
 
-    This tries standard JSON first, then falls back to cleaning the
-    payload text before re-parsing.
+    Standard JSON is tried first. The fallback uses ``ast.literal_eval``
+    rather than rewriting quote characters, so values that legitimately
+    contain quotes/apostrophes (e.g. file names) are not corrupted.
     """
-    # 1. Standard JSON parse first (most common case)
     try:
         return json.loads(payload)
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, ValueError):
         pass
 
-    # 2. Decode to text and clean up Python-isms
     try:
-        # Try utf-8 first, then latin-1 (bytes-preserving fallback)
         try:
             text = payload.decode("utf-8")
         except UnicodeDecodeError:
             text = payload.decode("latin-1")
 
-        # Clean up Python-format non-standard JSON
-        # Order matters: fix booleans FIRST to avoid True → "true" being
-        # affected by the single-quote step (which would make it "'true'")
-        text = text.replace("False", "false")
-        text = text.replace("True", "true")
-        text = text.replace("None", "null")
-        text = re.sub(r"'", '"', text)  # single quotes → double quotes
+        parsed = ast.literal_eval(text)
+        if isinstance(parsed, dict):
+            return parsed
+    except (ValueError, SyntaxError, UnicodeDecodeError):
+        pass
 
-        return json.loads(text)
-    except (json.JSONDecodeError, ValueError, UnicodeDecodeError) as err:
-        _LOGGER.warning(
-            "Failed to parse MQTT payload: %s\nRaw (repr): %r",
-            err,
-            payload[:500],
-        )
-        return None
+    _LOGGER.warning(
+        "Failed to parse MQTT payload. Raw (repr): %r",
+        payload[:500],
+    )
+    return None
 DEFAULT_TIMEOUT = 30
 
 
@@ -83,6 +76,7 @@ class BambuLanClient:
         self._connected = False
         self._status: PrinterStatus = PrinterStatus()
         self._status_callbacks: list[Callable[[PrinterStatus], None]] = []
+        self._connection_callbacks: list[Callable[[bool], None]] = []
         self._connection_lock = asyncio.Lock()
         self._reconnect_task: asyncio.Task | None = None
         self._should_reconnect = True
@@ -142,6 +136,27 @@ class BambuLanClient:
         """Unregister a status callback."""
         if callback in self._status_callbacks:
             self._status_callbacks.remove(callback)
+
+    def register_connection_callback(
+        self, callback: Callable[[bool], None]
+    ) -> None:
+        """Register a callback for connect/disconnect events."""
+        self._connection_callbacks.append(callback)
+
+    def unregister_connection_callback(
+        self, callback: Callable[[bool], None]
+    ) -> None:
+        """Unregister a connection callback."""
+        if callback in self._connection_callbacks:
+            self._connection_callbacks.remove(callback)
+
+    def _notify_connection_callbacks(self, connected: bool) -> None:
+        """Notify listeners of a connection state change."""
+        for callback in list(self._connection_callbacks):
+            try:
+                callback(connected)
+            except Exception:
+                _LOGGER.exception("Error in connection callback")
 
     async def async_connect(self) -> bool:
         """Connect to printer via MQTT."""
@@ -546,14 +561,17 @@ class BambuLanClient:
         if reason_code == 0:
             self._connected = True
             _LOGGER.info("Connected to printer %s", self._host)
+            self._notify_connection_callbacks(True)
         else:
             _LOGGER.error("Failed to connect with result code %s", reason_code)
             self._connected = False
+            self._notify_connection_callbacks(False)
 
     def _on_disconnect(self, client, userdata, disconnect_flags, reason_code, properties=None) -> None:
         """Handle MQTT disconnect callback (VERSION2 signature)."""
         self._connected = False
         _LOGGER.info("Disconnected from printer %s (reason_code=%s)", self._host, reason_code)
+        self._notify_connection_callbacks(False)
 
         if self._should_reconnect and self._loop is not None:
             self._loop.call_soon_threadsafe(self._start_reconnect_safe)

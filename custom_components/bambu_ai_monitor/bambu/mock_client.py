@@ -151,6 +151,7 @@ class MockBambuClient:
         self._connected = False
         self._status = PrinterStatus()
         self._status_callbacks: list[Callable[[PrinterStatus], None]] = []
+        self._connection_callbacks: list[Callable[[bool], None]] = []
         self._simulation_task: asyncio.Task | None = None
         self._should_run = False
 
@@ -206,6 +207,27 @@ class MockBambuClient:
         if callback in self._status_callbacks:
             self._status_callbacks.remove(callback)
 
+    def register_connection_callback(
+        self, callback: Callable[[bool], None]
+    ) -> None:
+        """Register a callback for connect/disconnect events."""
+        self._connection_callbacks.append(callback)
+
+    def unregister_connection_callback(
+        self, callback: Callable[[bool], None]
+    ) -> None:
+        """Unregister a connection callback."""
+        if callback in self._connection_callbacks:
+            self._connection_callbacks.remove(callback)
+
+    def _notify_connection_callbacks(self, connected: bool) -> None:
+        """Notify listeners of a connection state change."""
+        for callback in list(self._connection_callbacks):
+            try:
+                callback(connected)
+            except Exception:
+                pass
+
     async def async_connect(self) -> bool:
         """Simulate connecting to printer."""
         _LOGGER.info(
@@ -221,6 +243,7 @@ class MockBambuClient:
         # Start simulation loop
         loop = asyncio.get_event_loop()
         self._simulation_task = loop.create_task(self._simulate_print_loop())
+        self._notify_connection_callbacks(True)
 
         return True
 
@@ -231,6 +254,7 @@ class MockBambuClient:
             self._simulation_task.cancel()
             self._simulation_task = None
         self._connected = False
+        self._notify_connection_callbacks(False)
         _LOGGER.info("[DEBUG MODE] Mock printer disconnected")
 
     async def async_test_connection(self) -> bool:

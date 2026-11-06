@@ -142,12 +142,10 @@ class BambuAnomalyTypeSensor(BambuAIBaseEntity, SensorEntity):
     @property
     def native_value(self) -> str | None:
         """Return the anomaly type in Chinese."""
-        if self.coordinator.data.anomaly_type:
-            return ANOMALY_TRANSLATIONS.get(
-                self.coordinator.data.anomaly_type,
-                self.coordinator.data.anomaly_type,
-            )
-        return None
+        anomaly_type = self.coordinator.data.anomaly_type
+        if not anomaly_type or anomaly_type == "none":
+            return ANOMALY_TRANSLATIONS.get("none", "正常")
+        return ANOMALY_TRANSLATIONS.get(anomaly_type, anomaly_type)
 
 
 class BambuLayerSensor(BambuAIBaseEntity, SensorEntity):

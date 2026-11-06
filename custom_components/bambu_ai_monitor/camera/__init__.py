@@ -37,12 +37,11 @@ class BambuAICamera(CoordinatorEntity, Camera):
         Camera.__init__(self)
 
         data = coordinator.config_entry.data
-        serial = data.get("serial", data[CONF_HOST])
+        model = data.get(CONF_PRINTER_MODEL, "Bambu Printer")
+        serial = data.get(CONF_SERIAL) or data.get(CONF_HOST, "unknown")
         self._attr_unique_id = f"{serial}_camera"
         self._attr_name = "YOLO 检测画面"
 
-        model = data.get(CONF_PRINTER_MODEL, "Bambu Printer")
-        serial = data.get(CONF_SERIAL, data[CONF_HOST])
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, serial)},
             name=f"Bambu {model}",
@@ -54,11 +53,7 @@ class BambuAICamera(CoordinatorEntity, Camera):
         self, width: int | None = None, height: int | None = None
     ) -> bytes | None:
         """Return the latest annotated image from the coordinator's analysis."""
-        annotated = getattr(self.coordinator, "_last_annotated_image", None)
-        if annotated:
-            return annotated
-        # Placeholder when no analysis has run yet
-        return None
+        return self.coordinator.last_annotated_image
 
     @property
     def should_poll(self) -> bool:

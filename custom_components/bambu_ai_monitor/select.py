@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import timedelta
-
 from homeassistant.components.select import SelectEntity
 
 from .const import (
@@ -21,6 +19,7 @@ INTERVAL_OPTIONS = {
     600: "10分钟",
     1800: "30分钟",
 }
+_LABEL_TO_INTERVAL = {label: seconds for seconds, label in INTERVAL_OPTIONS.items()}
 
 
 def _setup_selects(coordinator: BambuAICoordinator) -> list[BambuAIBaseEntity]:
@@ -45,25 +44,28 @@ class BambuAnalysisIntervalSelect(BambuAIBaseEntity, SelectEntity):
 
     @property
     def current_option(self) -> str:
-        """Return the current interval."""
+        """Return the current interval label."""
         interval = self.coordinator.config_entry.options.get(
             CONF_ANALYSIS_INTERVAL, DEFAULT_ANALYSIS_INTERVAL
         )
-        return str(interval)
+        try:
+            return INTERVAL_OPTIONS.get(int(interval), str(interval))
+        except (TypeError, ValueError):
+            return str(interval)
 
     @property
     def options(self) -> list[str]:
-        """Return available options."""
-        return [str(k) for k in INTERVAL_OPTIONS]
+        """Return available interval labels."""
+        return list(INTERVAL_OPTIONS.values())
 
     async def async_select_option(self, option: str) -> None:
         """Change the selected option."""
-        interval = int(option)
+        interval = _LABEL_TO_INTERVAL.get(option)
+        if interval is None:
+            return
         options = dict(self.coordinator.config_entry.options)
         options[CONF_ANALYSIS_INTERVAL] = interval
         self.hass.config_entries.async_update_entry(
             self.coordinator.config_entry, options=options
         )
-        self.coordinator.update_interval = timedelta(seconds=interval)
-        self.coordinator.async_request_refresh()
         self.async_write_ha_state()

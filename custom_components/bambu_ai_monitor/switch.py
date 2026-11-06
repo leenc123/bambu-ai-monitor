@@ -36,16 +36,18 @@ class BambuAutoPauseSwitch(BambuAIBaseEntity, SwitchEntity):
     @property
     def is_on(self) -> bool:
         """Return True if auto-pause is enabled."""
-        return self.coordinator._auto_pause_enabled
+        return self.coordinator.config_entry.options.get(
+            CONF_AUTO_PAUSE, DEFAULT_AUTO_PAUSE
+        )
 
     async def async_turn_on(self, **kwargs) -> None:
         """Turn on auto-pause."""
         options = dict(self.coordinator.config_entry.options)
         options[CONF_AUTO_PAUSE] = True
+        # The update listener applies this without reloading the entry.
         self.hass.config_entries.async_update_entry(
             self.coordinator.config_entry, options=options
         )
-        self.coordinator._auto_pause_enabled = True
         self.async_write_ha_state()
 
     async def async_turn_off(self, **kwargs) -> None:
@@ -55,5 +57,4 @@ class BambuAutoPauseSwitch(BambuAIBaseEntity, SwitchEntity):
         self.hass.config_entries.async_update_entry(
             self.coordinator.config_entry, options=options
         )
-        self.coordinator._auto_pause_enabled = False
         self.async_write_ha_state()

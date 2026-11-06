@@ -26,7 +26,10 @@ CONF_SSH_KEY = "host_ssh_key"
 DEFAULT_CAMERA_PORT = 6000
 DEFAULT_MQTT_PORT = 8883
 DEFAULT_ANALYSIS_INTERVAL = 300  # 5 minutes
-DEFAULT_CONFIDENCE_THRESHOLD = 0.5  # YOLO detection confidence threshold
+# Old default kept only for the one-time options migration (0.5 was too strict
+# and dropped genuine 0.3-0.5 detections).
+LEGACY_CONFIDENCE_THRESHOLD = 0.5
+DEFAULT_CONFIDENCE_THRESHOLD = 0.35  # YOLO detection confidence threshold
 DEFAULT_AUTO_PAUSE = True
 DEFAULT_CONSECUTIVE_DETECTIONS = 2
 # Default ONNX model path: relative to the component directory
@@ -73,6 +76,7 @@ class AnomalyType(StrEnum):
 ANOMALY_TRANSLATIONS = {
     "spaghetti": "炒面/拉丝",
     "none": "正常",
+    "other": "未知异常",
 }
 
 # Printer status mapping

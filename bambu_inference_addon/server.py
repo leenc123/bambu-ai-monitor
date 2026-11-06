@@ -15,12 +15,13 @@ import argparse
 import json
 import io
 import logging
+import os
 from pathlib import Path
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import sys
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageOps
 
 logging.basicConfig(
     level=logging.INFO,
@@ -43,8 +44,10 @@ INPUT_SIZE = 640
 NMS_IOU_THRESHOLD = 0.45
 NMS_CONF_THRESHOLD = 0.25
 
-# Visualize confidence threshold (only draw boxes above this)
-VISUALIZE_CONF_THRESHOLD = 0.5
+# Draw every detection the detector reports. NMS already filters below
+# NMS_CONF_THRESHOLD, and the HA client applies its own decision threshold;
+# keeping these in sync avoids "sensor says anomaly but no box is drawn".
+VISUALIZE_CONF_THRESHOLD = NMS_CONF_THRESHOLD
 
 
 class YOLOHandler(BaseHTTPRequestHandler):
@@ -136,23 +139,28 @@ class YOLOHandler(BaseHTTPRequestHandler):
         log.info("Loading model: %s", resolved)
         opts = ort.SessionOptions()
         opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-        # Use all CPU cores for Orange Pi
-        opts.intra_op_num_threads = 4
+        # Use available cores (cap at 4 so weak NAS CPUs are not oversubscribed)
+        opts.intra_op_num_threads = min(4, os.cpu_count() or 1)
 
-        self.session = ort.InferenceSession(
+        session = ort.InferenceSession(
             resolved, opts, providers=["CPUExecutionProvider"],
         )
         log.info("Model loaded, warming up...")
 
         # Warm-up: run a dummy inference to trigger graph optimization
         dummy = np.random.randn(1, 3, INPUT_SIZE, INPUT_SIZE).astype(np.float32)
-        input_name = self.session.get_inputs()[0].name
-        self.session.run(None, {input_name: dummy})
+        input_name = session.get_inputs()[0].name
+        session.run(None, {input_name: dummy})
+
+        # Share the loaded session across requests. BaseHTTPRequestHandler
+        # creates a new handler instance per request, so assigning to
+        # ``self`` would be discarded and reload the model every request.
+        type(self).session = session
         log.info("Warm-up complete")
 
     def _run_detection(self, image_bytes: bytes) -> tuple[Image.Image, list[dict]]:
         """Run YOLO inference, return (original_image, detections)."""
-        image = Image.open(io.BytesIO(image_bytes))
+        image = ImageOps.exif_transpose(Image.open(io.BytesIO(image_bytes)))
         if image.mode != "RGB":
             image = image.convert("RGB")
 

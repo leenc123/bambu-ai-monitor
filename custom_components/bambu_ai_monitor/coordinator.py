@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
@@ -105,15 +106,24 @@ class BambuAICoordinator(DataUpdateCoordinator[BambuMonitorData]):
         )
         self._analysis_requested = False
         self._last_annotated_image: bytes | None = None
+        # Guards against overlapping analyses and enforces the configured cadence.
+        self._analysis_lock = asyncio.Lock()
+        self._last_analysis_monotonic = 0.0
+        # Set once async_initialize() has run (works with and without the HA
+        # 2024.8 `_async_setup` hook).
+        self._initialized = False
 
-        # Inference server lifecycle
-        inference_host = entry.data.get(
-            CONF_INFERENCE_HOST, DEFAULT_INFERENCE_HOST
+        # Inference server lifecycle (options take precedence over entry data,
+        # matching async_initialize(), so endpoint-change detection is stable).
+        inference_host = entry.options.get(
+            CONF_INFERENCE_HOST,
+            entry.data.get(CONF_INFERENCE_HOST, DEFAULT_INFERENCE_HOST),
         )
         inference_port = entry.options.get(
             CONF_INFERENCE_PORT,
             entry.data.get(CONF_INFERENCE_PORT, DEFAULT_INFERENCE_PORT),
         )
+        self._inference_endpoint = (inference_host, int(inference_port))
         self._inference_server = InferenceServerManager(
             inference_host=inference_host,
             inference_port=inference_port,
@@ -124,6 +134,50 @@ class BambuAICoordinator(DataUpdateCoordinator[BambuMonitorData]):
         """Get the Bambu client instance."""
         return self._bambu_client
 
+    @property
+    def inference_endpoint(self) -> tuple[str, int]:
+        """Return the configured inference (host, port) endpoint."""
+        return self._inference_endpoint
+
+    @property
+    def last_annotated_image(self) -> bytes | None:
+        """Return the most recent annotated camera frame (if any)."""
+        return self._last_annotated_image
+
+    def async_apply_options(self, options: dict) -> None:
+        """Apply runtime options in place without reloading the entry."""
+        self._auto_pause_enabled = options.get(
+            CONF_AUTO_PAUSE, DEFAULT_AUTO_PAUSE
+        )
+        self._confidence_threshold = options.get(
+            CONF_CONFIDENCE_THRESHOLD, DEFAULT_CONFIDENCE_THRESHOLD
+        )
+        self._consecutive_detections = options.get(
+            CONF_CONSECUTIVE_DETECTIONS, DEFAULT_CONSECUTIVE_DETECTIONS
+        )
+        interval = options.get(CONF_ANALYSIS_INTERVAL, DEFAULT_ANALYSIS_INTERVAL)
+        new_interval = timedelta(seconds=interval)
+        if self.update_interval != new_interval:
+            self.update_interval = new_interval
+        self.async_update_listeners()
+
+    def _analysis_due(self) -> bool:
+        """Return True if enough time has elapsed since the last analysis."""
+        interval = (
+            self.update_interval.total_seconds()
+            if self.update_interval
+            else DEFAULT_ANALYSIS_INTERVAL
+        )
+        return (time.monotonic() - self._last_analysis_monotonic) >= interval
+
+    def _clear_active_anomaly(self) -> None:
+        """Clear the current anomaly state (used when a print ends/stops)."""
+        self._consecutive_anomaly_count = 0
+        self._data.consecutive_anomaly_count = 0
+        self._data.anomaly_detected = False
+        self._data.anomaly_type = "none"
+        self._data.anomaly_confidence = 0.0
+
     def _get_update_interval(self) -> timedelta:
         """Get current update interval."""
         if self._entry:
@@ -132,8 +186,11 @@ class BambuAICoordinator(DataUpdateCoordinator[BambuMonitorData]):
             ))
         return timedelta(seconds=DEFAULT_ANALYSIS_INTERVAL)
 
-    async def _async_setup(self) -> None:
-        """Set up the coordinator connections."""
+    async def async_initialize(self) -> None:
+        """Set up the coordinator connections (idempotent)."""
+        if self._initialized:
+            return
+        self._initialized = True
         data = self._entry.data
         host = data[CONF_HOST]
         access_code = data[CONF_ACCESS_CODE]
@@ -169,6 +226,13 @@ class BambuAICoordinator(DataUpdateCoordinator[BambuMonitorData]):
             self._bambu_client = BambuLanClient(host, access_code, serial)
 
         self._bambu_client.register_status_callback(self._on_printer_status_update)
+        try:
+            self._bambu_client.register_connection_callback(
+                self._on_connection_change
+            )
+        except AttributeError:
+            # Older/mock clients may not expose the connection callback.
+            pass
 
         # Initialize YOLO detector (connects to host inference server)
         self._yolo_detector = YOLODetector(inference_host, inference_port)
@@ -187,6 +251,10 @@ class BambuAICoordinator(DataUpdateCoordinator[BambuMonitorData]):
                 self._data.printer_status = self._map_printer_status(
                     self._bambu_client.status.gcode_state
                 )
+
+    async def _async_setup(self) -> None:
+        """HA >= 2024.8 setup hook; delegates to async_initialize()."""
+        await self.async_initialize()
 
     async def _async_update_data(self) -> BambuMonitorData:
         """Fetch data from the printer and perform AI analysis."""
@@ -222,18 +290,19 @@ class BambuAICoordinator(DataUpdateCoordinator[BambuMonitorData]):
         # Periodically refresh inference server health status
         await self._inference_server.async_check_health()
 
-        # Only analyze when actively printing
-        # 放宽条件：除了 gcode_state == RUNNING，也检查实际进度
-        # 因为 MQTT 消息可能延迟，gcode_state 可能不准确
+        # Only analyze while a print is actually running (manual triggers are
+        # allowed via _analysis_requested). Using progress/layer as a fallback
+        # caused endless analysis of the empty bed after FINISH.
         is_printing = (
-            self._data.printer_status == "running"
-            or self._data.print_progress > 0
-            or self._data.layer_num > 0
-            or self._analysis_requested
+            self._data.printer_status == "running" or self._analysis_requested
         )
+
         if is_printing:
-            self._analysis_requested = False
-            await self._perform_analysis()
+            if self._analysis_requested or self._analysis_due():
+                self._analysis_requested = False
+                await self._perform_analysis()
+        elif self._data.printer_status in ("finished", "idle", "failed"):
+            self._clear_active_anomaly()
 
         return self._data
 
@@ -242,120 +311,130 @@ class BambuAICoordinator(DataUpdateCoordinator[BambuMonitorData]):
         if not self._bambu_client or not self._yolo_detector:
             return
 
-        try:
-            data = self._entry.data
+        if self._analysis_lock.locked():
+            _LOGGER.debug("Analysis already in progress, skipping this cycle")
+            return
 
-            # Check for mock mode
-            from .bambu.mock_client import MockBambuClient
-
-            if isinstance(self._bambu_client, MockBambuClient):
-                snapshot = self._bambu_client.snapshot_provider.get_snapshot()
-                _LOGGER.debug("DEBUG MODE: Using mock snapshot for analysis")
-            else:
-                # Try MQTT camera frame first (A1 Mini pushes JPEG via MQTT)
-                snapshot = None
-                if self._bambu_client and self._bambu_client.camera_frame:
-                    snapshot = self._bambu_client.camera_frame
-                    _LOGGER.info("Got snapshot from MQTT camera: %d bytes", len(snapshot))
-
-                if not snapshot:
-                    # Fallback 1: direct HTTP to printer port 6000
-                    snapshot = await async_capture_snapshot(
-                        data[CONF_HOST],
-                        data[CONF_ACCESS_CODE],
-                        data.get(CONF_CAMERA_PORT, DEFAULT_CAMERA_PORT),
-                    )
-
-                if not snapshot:
-                    # Fallback 2: use existing HA camera entity
-                    snapshot = await self._capture_from_ha_camera()
-
-            if not snapshot:
-                self._data.last_error = "Failed to capture camera snapshot"
-                return
-
-            # Check image quality before detection
-            quality_ok, quality_score = check_image_quality(snapshot)
-            if not quality_ok:
-                _LOGGER.warning(
-                    "Image too blurry (quality=%.1f), skipping detection",
-                    quality_score,
-                )
-                self._data.last_error = (
-                    f"画面不清晰，跳过检测 (清晰度: {quality_score:.0f})"
-                )
-                return
-
-            # Send to inference server for visualization (annotated image)
+        async with self._analysis_lock:
+            self._last_analysis_monotonic = time.monotonic()
             try:
-                self._last_annotated_image = await self._yolo_detector.async_visualize_image(
-                    snapshot
-                )
-                if self._last_annotated_image:
-                    _LOGGER.info(
-                        "Annotated image updated: %d bytes",
-                        len(self._last_annotated_image),
-                    )
+                data = self._entry.data
+
+                # Check for mock mode
+                from .bambu.mock_client import MockBambuClient
+
+                if isinstance(self._bambu_client, MockBambuClient):
+                    snapshot = self._bambu_client.snapshot_provider.get_snapshot()
+                    _LOGGER.debug("DEBUG MODE: Using mock snapshot for analysis")
                 else:
-                    _LOGGER.warning("Visualize returned no data")
-            except Exception as vis_err:
-                _LOGGER.warning("Failed to get annotated image: %s", vis_err)
-                self._last_annotated_image = None
+                    # Try MQTT camera frame first (A1 Mini pushes JPEG via MQTT)
+                    snapshot = None
+                    if self._bambu_client.camera_frame:
+                        snapshot = self._bambu_client.camera_frame
+                        _LOGGER.debug(
+                            "Got snapshot from MQTT camera: %d bytes", len(snapshot)
+                        )
 
-            # Run local YOLO detection
-            raw_response = await self._yolo_detector.async_analyze_image(
-                snapshot, {}
-            )
+                    if not snapshot:
+                        # Fallback 1: direct TLS/HTTP to printer port 6000
+                        snapshot = await async_capture_snapshot(
+                            data[CONF_HOST],
+                            data[CONF_ACCESS_CODE],
+                            data.get(CONF_CAMERA_PORT, DEFAULT_CAMERA_PORT),
+                        )
 
-            # Parse result
-            result = AIAnalysisResult.from_api_response(raw_response)
-            self._data.last_analysis = result
-            self._data.last_analysis_time = result.analysis_time
-            self._data.anomaly_confidence = result.confidence
-            self._data.anomaly_type = result.anomaly_type
-            self._data.last_error = None
+                    if not snapshot:
+                        # Fallback 2: use existing HA camera entity
+                        snapshot = await self._capture_from_ha_camera()
 
-            # Check for anomaly
-            if result.anomaly_detected and result.confidence >= self._confidence_threshold:
-                self._consecutive_anomaly_count += 1
-                self._data.consecutive_anomaly_count = self._consecutive_anomaly_count
+                if not snapshot:
+                    self._data.last_error = "Failed to capture camera snapshot"
+                    return
 
-                _LOGGER.warning(
-                    "Anomaly detected (%s): %s (confidence: %.2f, consecutive: %d/%d)",
-                    result.anomaly_type,
-                    result.description,
-                    result.confidence,
-                    self._consecutive_anomaly_count,
-                    self._consecutive_detections,
+                # Check image quality before detection. Run in an executor —
+                # the variance calculation touches every pixel and must not
+                # block the event loop.
+                quality_ok, quality_score = await self.hass.async_add_executor_job(
+                    check_image_quality, snapshot
                 )
-
-                # Auto-pause after consecutive detections
-                if self._consecutive_anomaly_count >= self._consecutive_detections:
-                    self._data.anomaly_detected = True
-
-                    if self._auto_pause_enabled:
-                        await self._async_pause_print()
-                        # Reset state atomically: counter + flag + data fields
-                        self._consecutive_anomaly_count = 0
-                        self._data.anomaly_detected = False
-                        self._data.consecutive_anomaly_count = 0
-
-                    # Send notification
-                    await self._async_send_notification(result)
-            else:
-                # Reset consecutive count if no anomaly or below threshold
-                if self._consecutive_anomaly_count > 0:
-                    _LOGGER.debug(
-                        "Anomaly not confirmed, resetting consecutive count"
+                if not quality_ok:
+                    _LOGGER.warning(
+                        "Image too blurry (quality=%.1f), skipping detection",
+                        quality_score,
                     )
+                    self._data.last_error = (
+                        f"画面过于模糊，跳过检测 (清晰度: {quality_score:.0f})"
+                    )
+                    return
+
+                # Run detection first so the anomaly decision is not delayed
+                # by the (second) visualization request.
+                raw_response = await self._yolo_detector.async_analyze_image(
+                    snapshot, {}
+                )
+                result = AIAnalysisResult.from_api_response(raw_response)
+
+                # Then fetch the annotated frame. Keep the previous frame on
+                # failure instead of blanking the camera.
+                try:
+                    annotated = await self._yolo_detector.async_visualize_image(
+                        snapshot
+                    )
+                    if annotated:
+                        self._last_annotated_image = annotated
+                        _LOGGER.debug(
+                            "Annotated image updated: %d bytes", len(annotated)
+                        )
+                except Exception as vis_err:
+                    _LOGGER.warning("Failed to get annotated image: %s", vis_err)
+
+                self._data.last_analysis = result
+                self._data.last_analysis_time = result.analysis_time
+                self._data.last_error = None
+
+                if (
+                    result.anomaly_detected
+                    and result.confidence >= self._confidence_threshold
+                ):
+                    self._consecutive_anomaly_count += 1
+                    self._data.consecutive_anomaly_count = (
+                        self._consecutive_anomaly_count
+                    )
+                    self._data.anomaly_type = result.anomaly_type
+                    self._data.anomaly_confidence = result.confidence
+
+                    _LOGGER.warning(
+                        "Anomaly detected (%s): %s (confidence: %.2f, consecutive: %d/%d)",
+                        result.anomaly_type,
+                        result.description,
+                        result.confidence,
+                        self._consecutive_anomaly_count,
+                        self._consecutive_detections,
+                    )
+
+                    if self._consecutive_anomaly_count >= self._consecutive_detections:
+                        # Keep the anomaly flag latched so the binary sensor
+                        # stays on until the print is resumed/cleared.
+                        self._data.anomaly_detected = True
+
+                        if self._auto_pause_enabled and self._data.printer_status == "running":
+                            await self._async_pause_print()
+
+                        await self._async_send_notification(result)
+                else:
+                    if self._consecutive_anomaly_count > 0:
+                        _LOGGER.debug(
+                            "Anomaly not confirmed, resetting consecutive count"
+                        )
                     self._consecutive_anomaly_count = 0
                     self._data.consecutive_anomaly_count = 0
-                # Always clear anomaly flag when current frame shows no anomaly
-                self._data.anomaly_detected = False
+                    self._data.anomaly_detected = False
+                    self._data.anomaly_type = "none"
+                    self._data.anomaly_confidence = result.confidence
 
-        except Exception as err:
-            self._data.last_error = f"Analysis error: {err}"
-            _LOGGER.error("Analysis error: %s", err)
+            except Exception as err:
+                self._data.last_error = f"Analysis error: {err}"
+                _LOGGER.error("Analysis error: %s", err)
 
     async def _capture_from_ha_camera(self) -> bytes | None:
         """Fallback: capture snapshot from HA camera entity (A1 Mini etc.)."""
@@ -407,8 +486,7 @@ class BambuAICoordinator(DataUpdateCoordinator[BambuMonitorData]):
         result = await self._bambu_client.async_resume_print()
         if result:
             self._data.printer_status = "running"
-            self._consecutive_anomaly_count = 0
-            self._data.anomaly_detected = False
+            self._clear_active_anomaly()
         return result
 
     async def async_stop_print(self) -> bool:
@@ -418,19 +496,8 @@ class BambuAICoordinator(DataUpdateCoordinator[BambuMonitorData]):
         result = await self._bambu_client.async_stop_print()
         if result:
             self._data.printer_status = "idle"
+            self._clear_active_anomaly()
         return result
-
-    def _schedule_analysis_from_callback(self) -> None:
-        """Schedule analysis from MQTT callback thread onto HA event loop.
-
-        MQTT callbacks run on paho's network thread.  We cannot await
-        async methods there — jump to the HA event loop thread instead.
-        """
-        self._analysis_requested = True
-        asyncio.run_coroutine_threadsafe(
-            self.async_request_refresh(),
-            self.hass.loop,
-        )
 
     async def async_analyze_now(self) -> None:
         """Trigger an immediate analysis."""
@@ -469,11 +536,7 @@ class BambuAICoordinator(DataUpdateCoordinator[BambuMonitorData]):
             total_layer_count,
         )
 
-        is_printing = (
-            new_status == "running"
-            or progress > 0
-            or layer_num > 0
-        )
+        is_printing = new_status == "running"
 
         # Post data update and optional analysis trigger to the HA event loop.
         # This is the ONLY thread-safe way to interact with HA from MQTT callbacks.
@@ -512,15 +575,36 @@ class BambuAICoordinator(DataUpdateCoordinator[BambuMonitorData]):
         # This is safe now — we're on the HA event loop
         self.async_set_updated_data(self._data)
 
-        if is_printing and not self._analysis_requested:
-            _LOGGER.info(
-                "Printer is printing (progress=%.1f%%), scheduling immediate analysis",
+        # Throttle: only kick a refresh when the configured interval has
+        # elapsed. Without this, every MQTT push (several per second while
+        # printing) bypassed the user's analysis interval entirely.
+        if (
+            is_printing
+            and not self._analysis_requested
+            and self._analysis_due()
+        ):
+            _LOGGER.debug(
+                "Scheduling analysis (progress=%.1f%%, interval elapsed)",
                 progress,
             )
-            # _schedule_analysis_from_callback normally posts to the event
-            # loop, but we're already ON the event loop here, so call directly.
             self._analysis_requested = True
             self.hass.async_create_task(self.async_request_refresh())
+
+    def _on_connection_change(self, connected: bool) -> None:
+        """Handle MQTT connect/disconnect (may run on the paho thread)."""
+        self.hass.loop.call_soon_threadsafe(
+            self._async_apply_connection_change, connected
+        )
+
+    def _async_apply_connection_change(self, connected: bool) -> None:
+        """Apply connection state on the HA event loop immediately."""
+        self._data.printer_online = connected
+        if not connected:
+            self._data.last_error = "Printer disconnected"
+            self._clear_active_anomaly()
+        else:
+            self._data.last_error = None
+        self.async_set_updated_data(self._data)
 
     async def _async_send_notification(self, result: AIAnalysisResult) -> None:
         """Send a persistent notification with analysis result."""
@@ -539,7 +623,9 @@ class BambuAICoordinator(DataUpdateCoordinator[BambuMonitorData]):
             self.hass,
             message=message,
             title="Bambu AI 打印监测",
-            notification_id=f"bambu_anomaly_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+            # Fixed id: repeated detections update the same notification
+            # instead of piling up a new one each time.
+            notification_id=f"bambu_anomaly_{self._entry.entry_id}",
         )
 
     @property

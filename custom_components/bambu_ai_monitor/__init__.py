@@ -10,7 +10,15 @@ from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers.device_registry import DeviceEntry
 
 from .const import (
+    CONF_ANALYSIS_INTERVAL,
+    CONF_CONFIDENCE_THRESHOLD,
+    CONF_INFERENCE_HOST,
+    CONF_INFERENCE_PORT,
+    DEFAULT_CONFIDENCE_THRESHOLD,
+    DEFAULT_INFERENCE_HOST,
+    DEFAULT_INFERENCE_PORT,
     DOMAIN,
+    LEGACY_CONFIDENCE_THRESHOLD,
     SERVICE_ANALYZE_NOW,
     SERVICE_SET_ANALYSIS_INTERVAL,
 )
@@ -37,24 +45,26 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     async def handle_analyze_now(call: ServiceCall) -> None:
         """Handle the analyze_now service call."""
         entry_id = call.data.get("entry_id")
+        coordinators = hass.data.get(DOMAIN, {})
         if entry_id:
-            coordinator = hass.data[DOMAIN].get(entry_id)
+            coordinator = coordinators.get(entry_id)
             if coordinator:
                 await coordinator.async_analyze_now()
         else:
-            for coordinator in hass.data[DOMAIN].values():
+            for coordinator in coordinators.values():
                 await coordinator.async_analyze_now()
 
     async def handle_set_analysis_interval(call: ServiceCall) -> None:
         """Handle the set_analysis_interval service call."""
         entry_id = call.data.get("entry_id")
         interval = call.data["interval"]
+        coordinators = hass.data.get(DOMAIN, {})
         if entry_id:
-            coordinator = hass.data[DOMAIN].get(entry_id)
+            coordinator = coordinators.get(entry_id)
             if coordinator:
                 await coordinator.async_set_analysis_interval(interval)
         else:
-            for coordinator in hass.data[DOMAIN].values():
+            for coordinator in coordinators.values():
                 await coordinator.async_set_analysis_interval(interval)
 
     hass.services.async_register(
@@ -67,11 +77,44 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     return True
 
 
+async def async_migrate_entry(hass: HomeAssistant, entry: BambuAIConfigEntry) -> bool:
+    """Migrate legacy config entries.
+
+    v1 -> v2: lower the confidence threshold from the old default (0.5) to
+    the new default (0.35). Only entries still on the exact old default are
+    touched, so a user-chosen value is never overwritten.
+    """
+    if entry.version > 2:
+        return False
+
+    if entry.version == 1:
+        options = dict(entry.options)
+        current = options.get(CONF_CONFIDENCE_THRESHOLD, LEGACY_CONFIDENCE_THRESHOLD)
+        try:
+            if float(current) == LEGACY_CONFIDENCE_THRESHOLD:
+                options[CONF_CONFIDENCE_THRESHOLD] = DEFAULT_CONFIDENCE_THRESHOLD
+        except (TypeError, ValueError):
+            pass
+        hass.config_entries.async_update_entry(
+            entry, version=2, options=options
+        )
+        _LOGGER.info(
+            "Migrated %s to config entry version 2 (threshold -> %s)",
+            entry.entry_id,
+            options.get(CONF_CONFIDENCE_THRESHOLD),
+        )
+
+    return True
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: BambuAIConfigEntry) -> bool:
     """Set up Bambu AI Print Monitor from a config entry."""
     coordinator = BambuAICoordinator(hass, entry)
 
     try:
+        # Works on every HA version: HA >= 2024.8 also calls this from
+        # _async_setup during the first refresh, but it is idempotent.
+        await coordinator.async_initialize()
         await coordinator.async_config_entry_first_refresh()
     except Exception as err:
         _LOGGER.error("Setup failed for entry %s: %s", entry.entry_id, err, exc_info=True)
@@ -87,7 +130,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: BambuAIConfigEntry) -> b
         hass.data[DOMAIN].pop(entry.entry_id)
         raise ConfigEntryNotReady("Failed to set up entities") from None
 
-    entry.async_on_unload(entry.add_update_listener(async_reload_entry))
+    entry.async_on_unload(entry.add_update_listener(async_update_options))
 
     return True
 
@@ -117,6 +160,36 @@ async def async_remove_config_entry_device(
     return True
 
 
-async def async_reload_entry(hass: HomeAssistant, entry: BambuAIConfigEntry) -> None:
-    """Reload a config entry."""
-    await hass.config_entries.async_reload(entry.entry_id)
+async def async_update_options(hass: HomeAssistant, entry: BambuAIConfigEntry) -> None:
+    """Apply option changes without reloading the whole integration.
+
+    Toggling a switch or dragging the threshold slider must not tear down
+    the MQTT connection. Only a change to the inference endpoint requires
+    a full reload (the client/server objects have to be rebuilt).
+    """
+    coordinator = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+    if coordinator is None:
+        return
+
+    new_host = entry.options.get(
+        CONF_INFERENCE_HOST,
+        entry.data.get(CONF_INFERENCE_HOST, DEFAULT_INFERENCE_HOST),
+    )
+    try:
+        new_port = int(entry.options.get(
+            CONF_INFERENCE_PORT,
+            entry.data.get(CONF_INFERENCE_PORT, DEFAULT_INFERENCE_PORT),
+        ))
+    except (TypeError, ValueError):
+        new_port = DEFAULT_INFERENCE_PORT
+
+    if coordinator.inference_endpoint != (new_host, new_port):
+        _LOGGER.info(
+            "Inference endpoint changed to %s:%s, reloading entry",
+            new_host,
+            new_port,
+        )
+        await hass.config_entries.async_reload(entry.entry_id)
+        return
+
+    coordinator.async_apply_options(dict(entry.options))

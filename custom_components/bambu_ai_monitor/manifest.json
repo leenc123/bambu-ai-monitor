@@ -8,10 +8,10 @@
   "integration_type": "device",
   "iot_class": "local_polling",
   "issue_tracker": "https://github.com/leenc123/bambu-ai-monitor/issues",
-  "loggers": ["bambu_ai_monitor"],
+  "loggers": ["custom_components.bambu_ai_monitor"],
   "requirements": [
     "paho-mqtt>=2.0.0",
     "pillow>=10.0.0"
 ],
-  "version": "0.2.1"
+  "version": "0.2.2"
 }

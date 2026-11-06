@@ -71,7 +71,7 @@ def _remap_input(user_input: dict[str, Any]) -> dict[str, Any]:
 class BambuAIMonitorConfigFlow(ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Bambu AI Print Monitor."""
 
-    VERSION = 1
+    VERSION = 2
 
     def __init__(self) -> None:
         """Initialize the config flow."""

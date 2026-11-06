@@ -52,8 +52,9 @@ class BambuConfidenceThresholdNumber(BambuAIBaseEntity, NumberEntity):
         """Update the confidence threshold."""
         options = dict(self.coordinator.config_entry.options)
         options[CONF_CONFIDENCE_THRESHOLD] = value
+        # The update listener applies this to the coordinator without a
+        # full integration reload.
         self.hass.config_entries.async_update_entry(
             self.coordinator.config_entry, options=options
         )
-        self.coordinator._confidence_threshold = value
         self.async_write_ha_state()

@@ -179,11 +179,39 @@ def parse_printer_status(
         status.print_weight = float(weight)
 
     if "fan" in print_data:
-        fan_info = print_data.get("fan", {})
-        if isinstance(fan_info, dict):
-            if "fan_speed" in fan_info:
-                status.fan_speed = int(fan_info.get("fan_speed", 0))
-        elif isinstance(fan_info, (int, float)):
-            status.fan_speed = int(fan_info)
+        fan_info = print_data.get("fan")
+        status.fan_speed = _coerce_int_fan(fan_info, status.fan_speed)
 
     return status
+
+
+def _coerce_int_fan(value, default: int) -> int:
+    """Coerce a fan payload into an int.
+
+    Bambu models report fans differently: a plain int, a dict like
+    ``{"fan_speed": "80"}``, or ``{"cooling_fan_speed": "80"}``. Values
+    may also be numeric strings.
+    """
+    def _to_int(raw) -> int | None:
+        try:
+            return int(float(raw))
+        except (TypeError, ValueError):
+            return None
+
+    if isinstance(value, (int, float)):
+        result = _to_int(value)
+        return result if result is not None else default
+    if isinstance(value, str):
+        result = _to_int(value)
+        return result if result is not None else default
+    if isinstance(value, dict):
+        for key in ("fan_speed", "cooling_fan_speed", "big_fan1_speed"):
+            if key in value:
+                result = _to_int(value[key])
+                if result is not None:
+                    return result
+        for raw in value.values():
+            result = _to_int(raw)
+            if result is not None:
+                return result
+    return default
